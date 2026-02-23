@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(__NEW_LINE_65041ca3d2b41d60__ cat /c/Users/ZRDes/Downloads/Brainrot_Folder/GameStructure/ServerStorage_Structure_Part5.lua)",
+      "Bash(python3:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(wc:*)",
+      "Bash(del:*)",
+      "Bash(dir:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
