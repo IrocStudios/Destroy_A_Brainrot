@@ -1,0 +1,26 @@
+{
+  "name": "BrainrotGame",
+  "tree": {
+    "$className": "DataModel",
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "$path": "ServerScriptService"
+    },
+
+    "ServerStorage": {
+      "$className": "ServerStorage",
+      "$path": "ServerStorage"
+    },
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "$path": "ReplicatedStorage"
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$path": "StarterPlayer"
+    }
+  }
+}
