@@ -10,12 +10,22 @@
 
     "ServerStorage": {
       "$className": "ServerStorage",
-      "$path": "ServerStorage"
+
+      "Services": {
+        "$path": "ServerStorage/Services"
+      }
     },
 
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "$path": "ReplicatedStorage"
+
+      "Client": {
+        "$path": "ReplicatedStorage/Client"
+      },
+
+      "Shared": {
+        "$path": "ReplicatedStorage/Shared"
+      }
     },
 
     "StarterPlayer": {
