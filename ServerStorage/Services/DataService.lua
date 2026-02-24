@@ -269,6 +269,13 @@ local function ApplyMigrations(data: any)
 end
 
 --////////////////////////////
+-- Dev: Auto-wipe UserIDs (always start fresh profile for these users)
+--////////////////////////////
+local DEV_WIPE_USERIDS: {[number]: boolean} = {
+	[2705035] = true, -- irocz (dev)
+}
+
+--////////////////////////////
 -- ProfileService (required in this project)
 --////////////////////////////
 local ProfileService: any? = nil
@@ -582,6 +589,17 @@ function DataService:LoadProfile(player: Player)
 			return
 		end
 
+		-- Dev auto-wipe: reset profile to template for dev users
+		if DEV_WIPE_USERIDS[userId] then
+			dprint(self, "DEV WIPE: Resetting profile for", player.Name, userId)
+			local template = MakeProfileTemplate()
+			template.UserId = userId
+			template.CreatedAt = nowUnix()
+			for k, v in pairs(template) do
+				profile.Data[k] = v
+			end
+		end
+
 		self._profiles[userId] = profile
 		self._data[userId] = profile.Data
 
@@ -609,6 +627,14 @@ function DataService:LoadProfile(player: Player)
 
 	raw.UserId = userId
 	if (raw.CreatedAt or 0) == 0 then raw.CreatedAt = nowUnix() end
+
+	-- Dev auto-wipe: reset profile to template for dev users (fallback path)
+	if DEV_WIPE_USERIDS[userId] then
+		dprint(self, "DEV WIPE (fallback): Resetting profile for", player.Name, userId)
+		raw = MakeProfileTemplate()
+		raw.UserId = userId
+		raw.CreatedAt = nowUnix()
+	end
 
 	self._profiles[userId] = { __fallback = true }
 	self._data[userId] = raw

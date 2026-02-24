@@ -102,8 +102,11 @@ function MoneyService:SpawnMoneyStacks(position: Vector3, totalValue: number, pl
 	totalValue = math.floor(totalValue + 0.5)
 	totalValue = math.clamp(totalValue, 1, 10 ^ 12)
 
-	local stacks = math.random(1, 15)
-	stacks = math.clamp(stacks, 1, 15)
+	-- Stack count proportional to cash value (min 2, more stacks for bigger drops)
+	-- log10 brackets: 1-9→2, 10-99→3, 100-999→4, 1k-9k→5, 10k-99k→6, 100k+→7+
+	local baseStacks = 2
+	local extraStacks = math.floor(math.log10(math.max(totalValue, 1)))
+	local stacks = math.clamp(baseStacks + extraStacks, 2, 15)
 
 	-- random weights -> integer values that sum to totalValue
 	local weights = table.create(stacks, 0)
@@ -131,13 +134,49 @@ function MoneyService:SpawnMoneyStacks(position: Vector3, totalValue: number, pl
 	local payloadOut = {} :: { any }
 	local baseY = position.Y + 1.0
 
+	-- Scatter tuning
+	local SCATTER_MIN  = 3    -- min scatter radius (studs)
+	local SCATTER_MAX  = 8    -- max scatter radius (studs)
+	local MAX_Y_DIFF   = 15   -- max vertical difference from origin before rejecting
+	local MAX_ATTEMPTS = 10   -- retries before falling back to center
+
+	-- Raycast params: exclude Enemies folder and MoneyDrops so we hit terrain/parts
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	local excludeList = {} :: { Instance }
+	local enemies = game:GetService("Workspace"):FindFirstChild("Enemies")
+	if enemies then table.insert(excludeList, enemies) end
+	local moneyDrops = game:GetService("Workspace"):FindFirstChild("MoneyDrops")
+	if moneyDrops then table.insert(excludeList, moneyDrops) end
+	rayParams.FilterDescendantsInstances = excludeList
+
+	local centerPos = Vector3.new(position.X, baseY, position.Z)
+
 	for i = 1, stacks do
 		local dropId = HttpService:GenerateGUID(false)
-		local angle = math.rad(math.random(0, 359))
-		local radius = math.random(6, 14) + math.random()
+		local pos: Vector3 = centerPos -- fallback
 
-		local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-		local pos = Vector3.new(position.X, baseY, position.Z) + offset
+		for _attempt = 1, MAX_ATTEMPTS do
+			local angle = math.rad(math.random(0, 359))
+			local radius = math.random(SCATTER_MIN, SCATTER_MAX) + math.random()
+			local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+			local candidate = centerPos + offset
+
+			-- Raycast down to verify ground exists and isn't wildly different in height
+			local rayOrigin = Vector3.new(candidate.X, position.Y + 20, candidate.Z)
+			local rayResult = game:GetService("Workspace"):Raycast(rayOrigin, Vector3.new(0, -60, 0), rayParams)
+
+			if rayResult then
+				local groundY = rayResult.Position.Y
+				if math.abs(groundY - position.Y) <= MAX_Y_DIFF then
+					-- Valid drop site
+					pos = Vector3.new(candidate.X, baseY, candidate.Z)
+					break
+				end
+			end
+			-- Invalid site (no ground or too far), retry next attempt
+			-- If all attempts fail, pos stays as centerPos (fallback)
+		end
 
 		self.Drops[dropId] = {
 			DropId = dropId,
@@ -158,7 +197,11 @@ function MoneyService:SpawnMoneyStacks(position: Vector3, totalValue: number, pl
 	dprint("Dropping cash:", totalValue, "stacks=", stacks, "to=", player.Name, "at=", tostring(position))
 
 	-- FireClient to ONLY this player, so the drops are local-only.
-	self.MoneySpawnRE:FireClient(player, payloadOut)
+	-- Include origin so client can animate stacks arcing outward from center.
+	self.MoneySpawnRE:FireClient(player, {
+		origin = { position.X, position.Y, position.Z },
+		drops = payloadOut,
+	})
 
 	return payloadOut
 end

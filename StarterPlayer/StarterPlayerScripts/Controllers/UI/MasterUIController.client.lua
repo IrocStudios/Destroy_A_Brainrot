@@ -5,16 +5,24 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LOCAL_PLAYER = Players.LocalPlayer
 
 local function findRootGui(playerGui: PlayerGui): ScreenGui
-	-- Prefer a ScreenGui named "GUI" or "BrainrotGui"
+	-- Wait for StarterGui contents to replicate into PlayerGui.
+	-- Without WaitForChild, the script can boot before the GUI exists.
 	for _, name in ipairs({ "GUI", "BrainrotGui", "MainGui" }) do
-		local g = playerGui:FindFirstChild(name)
-		if g and g:IsA("ScreenGui") then return g :: ScreenGui end
+		local g = playerGui:WaitForChild(name, 10)
+		if g and g:IsA("ScreenGui") then
+			print("[MasterUIController] Found RootGui via WaitForChild: " .. name)
+			return g :: ScreenGui
+		end
 	end
-	-- Fall back to the first ScreenGui we find
+	-- Fall back to the first ScreenGui already present
 	for _, child in ipairs(playerGui:GetChildren()) do
-		if child:IsA("ScreenGui") then return child :: ScreenGui end
+		if child:IsA("ScreenGui") then
+			print("[MasterUIController] Fallback RootGui: " .. child.Name)
+			return child :: ScreenGui
+		end
 	end
 	-- Last resort: create one so the rest of the system doesn't error
+	warn("[MasterUIController] No ScreenGui found after waiting – creating empty GUI")
 	local sg = Instance.new("ScreenGui")
 	sg.Name = "GUI"
 	sg.ResetOnSpawn = false
@@ -206,13 +214,11 @@ local playerGui    = LOCAL_PLAYER:WaitForChild("PlayerGui")
 local rootGui      = findRootGui(playerGui)
 local framesFolder = findFramesFolder(rootGui)
 
-if not framesFolder then
-	-- Create a placeholder Frames folder so modules degrade gracefully
-	local ff = Instance.new("Folder")
-	ff.Name   = "Frames"
-	ff.Parent = rootGui
-	framesFolder = ff
-	warn("[MasterUIController] 'Frames' folder not found in ScreenGui – created empty placeholder.")
+print("[MasterUIController] RootGui: " .. rootGui:GetFullName() .. " [" .. rootGui.ClassName .. "]")
+if framesFolder then
+	print("[MasterUIController] FramesFolder: " .. framesFolder:GetFullName() .. " [" .. framesFolder.ClassName .. "]")
+else
+	warn("[MasterUIController] FramesFolder not found – frame-based modules will be skipped")
 end
 
 local UILibModule = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UI"):WaitForChild("UILibrary")
@@ -238,11 +244,22 @@ local ctx = {
 	FramesFolder = framesFolder,
 }
 
+print("[MasterUIController] Config keys loaded: " .. tostring(#config > 0 or next(config) ~= nil))
+print("[MasterUIController] Net loaded: " .. tostring(net ~= nil))
+print("[MasterUIController] State loaded: " .. tostring(state ~= nil) .. " (has Changed: " .. tostring(type(state) == "table" and state.Changed ~= nil) .. ")")
+print("[MasterUIController] Router created: " .. tostring(router ~= nil))
+
 local modulesFolder = getModulesFolder()
 if not modulesFolder then
 	warn("[MasterUIController] Modules folder not found – expected StarterPlayerScripts/Controllers/UI/Modules/")
 else
+	print("[MasterUIController] Modules folder: " .. modulesFolder:GetFullName())
 	local modules = requireAllModules(modulesFolder)
+	local count = 0
+	for name, _ in pairs(modules) do
+		count += 1
+		print("[MasterUIController] Loaded module: " .. name)
+	end
 	startModules(modules, ctx)
-	print(("[MasterUIController] Boot complete – %d modules loaded"):format(#modulesFolder:GetChildren()))
+	print(("[MasterUIController] Boot complete – %d modules loaded"):format(count))
 end

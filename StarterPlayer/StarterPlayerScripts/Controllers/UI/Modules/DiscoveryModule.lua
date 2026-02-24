@@ -1,116 +1,247 @@
 --!strict
 -- DiscoveryModule.lua  |  Frame: Discovery
--- Popup that appears when the player discovers a new brainrot for the first time.
--- Triggered by server Notify event or BrainrotClientController.
--- Auto-closes after a delay.
+-- Toast popup when the player discovers a new brainrot for the first time.
+-- Triggered by server Notify event with type = "discovery".
+-- Auto-closes after AUTO_CLOSE_SECONDS.
 --
--- WIRE-UP NOTES:
---   Frame "Discovery"
---     ├─ BrainrotIcon   (ImageLabel)
---     ├─ BrainrotName   (TextLabel)
---     ├─ RarityLabel    (TextLabel)
---     ├─ RarityBar      (Frame)
---     ├─ FlavorText     (TextLabel – "New Discovery!")
---     └─ XButton    (TextButton)
+-- WIRE-UP (Studio frame hierarchy):
+--   Discovery [Frame]
+--     Canvas [CanvasGroup]
+--       Header [Frame]
+--         newlable [TextLabel] "New!"
+--         Title [TextLabel]          ← brainrot display name
+--           Title2 [TextLabel]       ← shadow copy of display name
+--         Rarity [TextLabel]         ← rarity name
+--         Shines [CanvasGroup]
+--           Shine [Frame] x2
+--         Stud [ImageLabel]
+--     IconHolder [Frame]
+--       Shine [ImageLabel]           ← spin this
+--     UIScale [UIScale]
+
+local TweenService     = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local DiscoveryModule = {}
 DiscoveryModule.__index = DiscoveryModule
 
-local AUTO_CLOSE_DELAY = 5
+local DISPLAY_SECONDS  = 5     -- how long the popup stays fully visible
+local SHRINK_DURATION  = 1.0   -- how long the shrink-out tween takes
+local SPIN_DURATION    = 12    -- seconds per full shine rotation (slower = more elegant)
 
 local function find(parent: Instance, name: string): Instance?
 	return parent:FindFirstChild(name, true)
 end
 
-function DiscoveryModule:Init(ctx: any)
-	self._ctx       = ctx
-	self._janitor   = ctx.UI.Cleaner.new()
-	self._autoClose = nil :: thread?
-	self._frame     = ctx.FramesFolder and ctx.FramesFolder:FindFirstChild("Discovery")
-	if not self._frame then warn("[DiscoveryModule] Frame 'Discovery' not found") return end
+-- ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-	local closeBtn = find(self._frame, "XButton")
-	if closeBtn then
-		self._janitor:Add((closeBtn :: GuiButton).MouseButton1Click:Connect(function()
-			self:_hide()
-		end))
+function DiscoveryModule:Init(ctx: any)
+	self._ctx         = ctx
+	self._janitor     = ctx.UI.Cleaner.new()
+	self._autoClose   = nil :: thread?
+	self._spinTween   = nil :: Tween?
+	self._shrinkTween = nil :: Tween?
+	self._open        = false
+	self._frame       = ctx.FramesFolder and ctx.FramesFolder:FindFirstChild("Discovery")
+
+	if not self._frame then
+		warn("[DiscoveryModule] Frame 'Discovery' not found")
+		return
 	end
 
-	self._frame.Visible = false
+	-- Cache refs
+	self._titleLbl      = find(self._frame, "Title")      :: TextLabel?  -- inside Header
+	self._rarityLbl     = find(self._frame, "Rarity")     :: TextLabel?
+	self._iconHolder    = self._frame:FindFirstChild("IconHolder") :: Frame?
+	self._iconHolderShine = self._iconHolder and self._iconHolder:FindFirstChild("Shine") :: ImageLabel?
+	self._uiScale         = self._frame:FindFirstChildOfClass("UIScale") :: UIScale?
+
+	-- Brainrots folder in ReplicatedStorage (each child is a Folder with Body + Icon)
+	self._brainrotsFolder = ReplicatedStorage:FindFirstChild("Brainrots")
+
+	-- Discovery sound from LocalResources/Sound
+	local localRes = ctx.RootGui and ctx.RootGui:FindFirstChild("LocalResources")
+	local soundFolder = localRes and localRes:FindFirstChild("Sound")
+	self._discoverySound = soundFolder and soundFolder:FindFirstChild("Discovery_Sound") :: Sound?
 end
 
 function DiscoveryModule:Start()
 	if not self._frame then return end
-	local ctx = self._ctx
 
-	-- Server fires Notify with type "discovery" when a new brainrot is discovered
-	local notifyRE = ctx.Net:GetEvent("Notify")
+	-- Listen for server discovery notification
+	local notifyRE = self._ctx.Net:GetEvent("Notify")
 	self._janitor:Add(notifyRE.OnClientEvent:Connect(function(payload)
 		if type(payload) == "table" and payload.type == "discovery" then
-			self:Show(payload.brainrotId or payload.id or "")
+			self:Show(payload)
 		end
 	end))
 end
 
--- Show popup for a given brainrot key
-function DiscoveryModule:Show(brainrotKey: string)
+-- ── Show / Hide ──────────────────────────────────────────────────────────────
+
+function DiscoveryModule:Show(payload: any)
 	if not self._frame then return end
-	local ctx      = self._ctx
-	local brainCfg = ctx.Config.BrainrotConfig or {}
-	local rarCfg   = ctx.Config.RarityConfig
-	local data     = brainCfg[brainrotKey] or {}
 
-	local nameLbl   = find(self._frame, "BrainrotName") :: TextLabel?
-	local rarLbl    = find(self._frame, "RarityLabel")  :: TextLabel?
-	local rarBar    = find(self._frame, "RarityBar")    :: Frame?
-	local iconLbl   = find(self._frame, "BrainrotIcon") :: ImageLabel?
-	local flavorLbl = find(self._frame, "FlavorText")   :: TextLabel?
+	local brainrotId  = tostring(payload.brainrotId or payload.id or "")
+	local displayName = tostring(payload.name or brainrotId)
+	local rarityName  = tostring(payload.rarity or "Common")
 
-	if nameLbl   then nameLbl.Text   = data.DisplayName or brainrotKey end
-	if flavorLbl then flavorLbl.Text = "New Discovery!" end
-
-	local rname = data.RarityName or "Common"
-	if rarLbl then
-		rarLbl.Text = rname
-		if rarCfg then
-			local rData = rarCfg.Rarities[rname]
-			if rData then rarLbl.TextColor3 = rData.Color end
+	-- Populate title + shadow
+	if self._titleLbl then
+		(self._titleLbl :: TextLabel).Text = displayName
+		local title2 = (self._titleLbl :: Instance):FindFirstChild("Title2") :: TextLabel?
+		if title2 then
+			title2.Text = displayName
 		end
 	end
-	if rarBar and rarCfg then
-		local rData = rarCfg.Rarities[rname]
-		if rData then rarBar.BackgroundColor3 = rData.Color end
+
+	-- Populate rarity
+	if self._rarityLbl then
+		(self._rarityLbl :: TextLabel).Text = rarityName
 	end
 
-	-- Open frame and animate icon
-	if ctx.Router then ctx.Router:Open("Discovery") end
-	ctx.UI.Sound:Play("cartoon_pop")
+	-- Clone icon from ReplicatedStorage.Brainrots[brainrotId].Icon into IconHolder
+	self:_setIcon(brainrotId)
 
-	if iconLbl then
-		local spinH = ctx.UI.Effects.Spin(iconLbl, 1.0)
-		local pulseH = ctx.UI.Effects.Pulse(iconLbl, 1.5, 0.05)
-		task.delay(2, function()
-			spinH:Destroy()
-			pulseH:Destroy()
-		end)
+	-- Spin the Shine in IconHolder
+	self:_startShine()
+
+	-- Cancel any previous shrink / auto-close
+	self:_cancelTimers()
+
+	-- Play discovery sound
+	if self._discoverySound then
+		self._discoverySound:Play()
 	end
 
-	-- Auto-close
-	if self._autoClose then task.cancel(self._autoClose) end
-	self._autoClose = task.delay(AUTO_CLOSE_DELAY, function()
-		self:_hide()
+	-- Open like a menu via Router (bounce tween in)
+	self._open = true
+	if self._ctx.Router then
+		self._ctx.Router:Open("Discovery")
+	end
+
+	-- After DISPLAY_SECONDS, smoothly shrink to 0 then hide
+	self._autoClose = task.delay(DISPLAY_SECONDS, function()
+		self:_shrinkOut()
 		self._autoClose = nil
 	end)
 end
 
-function DiscoveryModule:_hide()
-	if self._autoClose then task.cancel(self._autoClose); self._autoClose = nil end
-	if not self._frame then return end
-	if self._ctx.Router then self._ctx.Router:Close("Discovery") end
+function DiscoveryModule:_cancelTimers()
+	if self._autoClose then
+		task.cancel(self._autoClose)
+		self._autoClose = nil
+	end
+	if self._shrinkTween then
+		self._shrinkTween:Cancel()
+		self._shrinkTween = nil
+	end
 end
 
+-- Smoothly scale the popup down to 0, then clean up
+function DiscoveryModule:_shrinkOut()
+	if not self._open then return end
+	if not self._uiScale then
+		-- No UIScale found, fall back to Router close
+		self:_hide()
+		return
+	end
+
+	local info = TweenInfo.new(SHRINK_DURATION, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+	self._shrinkTween = TweenService:Create(self._uiScale :: Instance, info, { Scale = 0 })
+	self._shrinkTween.Completed:Once(function()
+		self._shrinkTween = nil
+		-- We already animated to scale 0, so hide directly without Router:Close
+		-- (Router:Close would run its own scale-down animation, causing a double-close)
+		self._open = false
+		self:_stopShine()
+		self._frame.Visible = false
+		-- Reset UIScale to 1 so the next Show() / Router:Open works correctly
+		if self._uiScale then
+			(self._uiScale :: UIScale).Scale = 1
+		end
+	end)
+	self._shrinkTween:Play()
+end
+
+function DiscoveryModule:_hide()
+	if not self._frame then return end
+	if not self._open then return end
+	self._open = false
+
+	self:_cancelTimers()
+	self:_stopShine()
+
+	if self._ctx.Router then
+		self._ctx.Router:Close("Discovery")
+	end
+end
+
+-- ── Icon ─────────────────────────────────────────────────────────────────────
+
+function DiscoveryModule:_setIcon(brainrotId: string)
+	if not self._iconHolder then return end
+
+	-- Clear any previously cloned icon (anything that isn't the Shine)
+	for _, child in ipairs((self._iconHolder :: Frame):GetChildren()) do
+		if child.Name ~= "Shine" and not child:IsA("UIConstraint") and not child:IsA("UIAspectRatioConstraint") then
+			child:Destroy()
+		end
+	end
+
+	if not self._brainrotsFolder then return end
+
+	-- Each brainrot is a Folder: { Body [Model], Icon [ImageLabel] }
+	local brainrotFolder = self._brainrotsFolder:FindFirstChild(brainrotId)
+	if not brainrotFolder then
+		-- Fallback to Default
+		brainrotFolder = self._brainrotsFolder:FindFirstChild("Default")
+	end
+	if not brainrotFolder then return end
+
+	local iconTemplate = brainrotFolder:FindFirstChild("Icon")
+	if not iconTemplate then return end
+
+	local iconClone = iconTemplate:Clone()
+	iconClone.Name = "BrainrotIcon"
+
+	-- Fill the holder
+	if iconClone:IsA("GuiObject") then
+		iconClone.Size = UDim2.fromScale(1, 1)
+		iconClone.Position = UDim2.fromScale(0.5, 0.5)
+		iconClone.AnchorPoint = Vector2.new(0.5, 0.5)
+	end
+
+	iconClone.Parent = self._iconHolder
+end
+
+-- ── Shine Spin ───────────────────────────────────────────────────────────────
+
+function DiscoveryModule:_startShine()
+	self:_stopShine()
+
+	local shine = self._iconHolderShine
+	if not shine then return end
+
+	-- Slow continuous 360 spin
+	(shine :: ImageLabel).Rotation = 0
+	local tweenInfo = TweenInfo.new(SPIN_DURATION, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1)
+	self._spinTween = TweenService:Create(shine :: Instance, tweenInfo, { Rotation = 360 })
+	self._spinTween:Play()
+end
+
+function DiscoveryModule:_stopShine()
+	if self._spinTween then
+		self._spinTween:Cancel()
+		self._spinTween = nil
+	end
+end
+
+-- ── Cleanup ──────────────────────────────────────────────────────────────────
+
 function DiscoveryModule:Destroy()
-	if self._autoClose then task.cancel(self._autoClose) end
+	self:_cancelTimers()
+	self:_stopShine()
 	if self._janitor then self._janitor:Cleanup(); self._janitor = nil end
 end
 

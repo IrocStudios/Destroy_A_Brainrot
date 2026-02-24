@@ -1,11 +1,38 @@
 --!strict
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local ProgressionService = {}
 
+-- Derive XP curve from ProgressionConfig so server + client always agree.
+local function loadXPCurve()
+	local ok, cfg = pcall(function()
+		return require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("ProgressionConfig"))
+	end)
+	if ok and cfg and cfg.XPCurve then
+		return cfg.XPCurve
+	end
+	return nil
+end
+
+local _xpCurve: any = nil
+
 local function xpRequiredForLevel(level: number): number
-	-- Simple curve; you can replace later without changing API.
-	-- L1->100, L2->150, L3->225...
 	level = math.max(1, math.floor(level))
-	return math.floor(100 * (1.5 ^ (level - 1)))
+
+	if not _xpCurve then
+		_xpCurve = loadXPCurve() or {}
+	end
+
+	-- Check overrides first
+	if type(_xpCurve.Overrides) == "table" and _xpCurve.Overrides[level] then
+		return tonumber(_xpCurve.Overrides[level]) or 100
+	end
+
+	-- Use config formula: floor(Base + Growth * (level ^ Power))
+	local base   = tonumber(_xpCurve.Base)   or 65
+	local growth = tonumber(_xpCurve.Growth) or 14.5
+	local power  = tonumber(_xpCurve.Power)  or 1.62
+	return math.floor(base + growth * (level ^ power))
 end
 
 function ProgressionService:Init(services)
@@ -49,21 +76,12 @@ function ProgressionService:AddXP(player: Player, amount: number, reason: string
 		return profile
 	end)
 
-	if self.NetService and self.NetService.SendDelta then
-		self.NetService:SendDelta(player, {
-			op = "set",
-			path = "Progression.XP",
-			value = newXP,
-			meta = { reason = reason or "AddXP" },
-		})
+	if self.NetService then
+		self.NetService:QueueDelta(player, "XP", newXP)
 		if leveledUp then
-			self.NetService:SendDelta(player, {
-				op = "set",
-				path = "Progression.Level",
-				value = newLevel,
-				meta = { reason = "LevelUp" },
-			})
+			self.NetService:QueueDelta(player, "Level", newLevel)
 		end
+		self.NetService:FlushDelta(player)
 	end
 
 	return true, { leveledUp = leveledUp, level = newLevel, xp = newXP }
@@ -79,8 +97,9 @@ function ProgressionService:LevelUp(player: Player)
 		return profile
 	end)
 
-	if self.NetService and self.NetService.SendDelta then
-		self.NetService:SendDelta(player, { op = "set", path = "Progression.Level", value = newLevel })
+	if self.NetService then
+		self.NetService:QueueDelta(player, "Level", newLevel)
+		self.NetService:FlushDelta(player)
 	end
 
 	return true, newLevel
@@ -101,8 +120,9 @@ function ProgressionService:UnlockStage(player: Player, stageNumber: number)
 		return profile
 	end)
 
-	if self.NetService and self.NetService.SendDelta then
-		self.NetService:SendDelta(player, { op = "set", path = "Progression.StageUnlocked", value = newStage })
+	if self.NetService then
+		self.NetService:QueueDelta(player, "StageUnlocked", newStage)
+		self.NetService:FlushDelta(player)
 	end
 
 	return true, newStage
@@ -123,8 +143,9 @@ function ProgressionService:AddRebirth(player: Player, amount: number?)
 		return profile
 	end)
 
-	if self.NetService and self.NetService.SendDelta then
-		self.NetService:SendDelta(player, { op = "set", path = "Progression.Rebirths", value = newRebirths })
+	if self.NetService then
+		self.NetService:QueueDelta(player, "Rebirths", newRebirths)
+		self.NetService:FlushDelta(player)
 	end
 
 	return true, newRebirths

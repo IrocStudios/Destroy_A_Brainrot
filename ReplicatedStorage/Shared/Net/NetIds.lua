@@ -27,6 +27,7 @@ NetIds.RemoteFunctions = {
 	CodesAction     = "CodesAction",
 	SettingsAction  = "SettingsAction",
 	CommandAction   = "CommandAction",
+	DeathAction     = "DeathAction",
 }
 
 

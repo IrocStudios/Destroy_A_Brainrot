@@ -39,10 +39,22 @@ function StatsModule:_refresh(state: any)
 	local curr = s.Currency    or {}
 	local idx  = s.Index       or {}
 
-	local kills       = idx.BrainrotsKilled    or 0
+	-- BrainrotsKilled is a map {[brainrotId] = count} — sum all values
+	local kills = 0
+	if type(idx.BrainrotsKilled) == "table" then
+		for _, count in pairs(idx.BrainrotsKilled) do
+			kills += (tonumber(count) or 0)
+		end
+	elseif type(idx.BrainrotsKilled) == "number" then
+		kills = idx.BrainrotsKilled
+	end
+
+	-- BrainrotsDiscovered is a map {[brainrotId] = true} — count keys
 	local discoveries = 0
 	if type(idx.BrainrotsDiscovered) == "table" then
-		discoveries = #idx.BrainrotsDiscovered
+		for _ in pairs(idx.BrainrotsDiscovered) do
+			discoveries += 1
+		end
 	end
 	local cash     = curr.Cash          or 0
 	local rebirths = prog.Rebirths      or 0

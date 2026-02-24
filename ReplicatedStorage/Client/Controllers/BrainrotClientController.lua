@@ -169,31 +169,51 @@ function BrainrotClient:_refreshBillboard(entry: ActiveEntry)
 		return (obj and obj:IsA("TextLabel")) and obj or nil
 	end
 
-	local title = findText("Title") or findText("EnemyName")
-	if title then title.Text = displayName end
+	-- EnemyName + shadow (EnemyName2)
+	local title = findText("EnemyName")
+	if title then
+		title.Text = displayName
+		local shadow = title:FindFirstChild("EnemyName2") :: TextLabel?
+		if shadow then shadow.Text = displayName end
+	end
 
+	-- Rarity
 	local rarityText = findText("Rarity")
 	if rarityText then rarityText.Text = rarityName end
 
+	-- Price (project standard: $%.2fk / $%.2fm / $%.2fb)
 	local priceText = findText("Price")
 	if priceText then
-		local txt = "$" .. tostring(price)
-		if price >= 1000 then
-			txt = ("$%.1fk"):format(price / 1000)
+		local txt
+		if price >= 1e9 then
+			txt = ("$%.2fb"):format(price / 1e9)
+		elseif price >= 1e6 then
+			txt = ("$%.2fm"):format(price / 1e6)
+		elseif price >= 1e3 then
+			txt = ("$%.2fk"):format(price / 1e3)
+		else
+			txt = "$" .. tostring(math.floor(price))
 		end
 		priceText.Text = txt
 	end
 
+	-- Health bar + numeric health value
+	local maxH = math.max(1, entry.Humanoid.MaxHealth)
+	local currentH = entry.Humanoid.Health
+	local pct = math.clamp(currentH / maxH, 0, 1)
+
 	local healthBar = bb:FindFirstChild("Health", true)
 	if healthBar and healthBar:IsA("Frame") then
-		local maxH = math.max(1, entry.Humanoid.MaxHealth)
-		local pct = math.clamp(entry.Humanoid.Health / maxH, 0, 1)
 		healthBar.Size = UDim2.new(pct, 0, healthBar.Size.Y.Scale, healthBar.Size.Y.Offset)
 	end
 
-	local studLabel = findText("Stud")
-	if studLabel then
-		studLabel.Text = tostring(math.floor(entry.Humanoid.Health + 0.5))
+	-- HealthVal + shadow (HealthVal2)
+	local healthVal = findText("HealthVal")
+	if healthVal then
+		local hpText = tostring(math.floor(currentH + 0.5))
+		healthVal.Text = hpText
+		local shadow = healthVal:FindFirstChild("HealthVal2") :: TextLabel?
+		if shadow then shadow.Text = hpText end
 	end
 end
 
@@ -297,9 +317,16 @@ function BrainrotClient:_attach(entry: ActiveEntry)
 		return
 	end
 
-	local source = getBrainrotsFolder():FindFirstChild(brainrotName)
+	local brainrotFolder = getBrainrotsFolder():FindFirstChild(brainrotName)
+	if not brainrotFolder then
+		dwarn("Attach failed: no folder in ReplicatedStorage.Brainrots for", brainrotName, "enemy=", entry.Model:GetFullName())
+		return
+	end
+
+	-- New structure: each brainrot is a Folder containing Body [Model], Icon, Info
+	local source = brainrotFolder:FindFirstChild("Body")
 	if not source or not source:IsA("Model") then
-		dwarn("Attach failed: missing source model in ReplicatedStorage.Brainrots for", brainrotName, "enemy=", entry.Model:GetFullName())
+		dwarn("Attach failed: no Body model inside Brainrots/", brainrotName, "enemy=", entry.Model:GetFullName())
 		return
 	end
 

@@ -54,12 +54,6 @@ local function dwarn(...)
 	end
 end
 
-local function getBrainrotConfig()
-	local shared = ReplicatedStorage:WaitForChild("Shared")
-	local cfg = shared:WaitForChild("Config")
-	return require(cfg:WaitForChild("BrainrotConfig"))
-end
-
 local function getOrCreateFolder(parent: Instance, name: string): Folder
 	local f = parent:FindFirstChild(name)
 	if f and f:IsA("Folder") then return f end
@@ -117,24 +111,35 @@ local function getHumanoidAndHRP(model: Model): (Humanoid, BasePart)
 	return hum, pp
 end
 
-local function getBodyTemplate(brainrotName: string): Model?
+-- Each brainrot in ReplicatedStorage.Brainrots is a Folder: { Body [Model], Icon, Info [Configuration] }
+local function getBrainrotFolder(brainrotName: string): Folder?
 	local folder = ReplicatedStorage:FindFirstChild("Brainrots")
 	if not folder or not folder:IsA("Folder") then
-		dwarn("ReplicatedStorage.Brainrots folder missing; cannot size HRP from body model.")
+		dwarn("ReplicatedStorage.Brainrots folder missing.")
 		return nil
 	end
-
-	local m = folder:FindFirstChild(brainrotName)
-	if m and m:IsA("Model") then
-		return m
-	end
-
+	local f = folder:FindFirstChild(brainrotName)
+	if f then return f :: Folder end
 	local def = folder:FindFirstChild("Default")
-	if def and def:IsA("Model") then
-		return def
-	end
-
+	if def then return def :: Folder end
 	return nil
+end
+
+local function getBodyTemplate(brainrotName: string): Model?
+	local brainrotFolder = getBrainrotFolder(brainrotName)
+	if not brainrotFolder then return nil end
+	local body = brainrotFolder:FindFirstChild("Body")
+	if body and body:IsA("Model") then return body end
+	return nil
+end
+
+-- Read stats from the Info Configuration inside the brainrot folder
+local function readInfoConfig(brainrotName: string): { [string]: any }
+	local brainrotFolder = getBrainrotFolder(brainrotName)
+	if not brainrotFolder then return {} end
+	local infoCfg = brainrotFolder:FindFirstChild("Info")
+	if not infoCfg then return {} end
+	return infoCfg:GetAttributes()
 end
 
 local function computeBodyExtentsSize(bodyTemplate: Model): Vector3?
@@ -445,38 +450,41 @@ function BrainrotService:_countOccupants(zoneRt: ZoneRuntime): number
 end
 
 function BrainrotService:_applyBaseline(model: Model, brainrotName: string): (number, number, string)
-	local BrainrotConfig = getBrainrotConfig()
-	local entry = BrainrotConfig[brainrotName] or BrainrotConfig["Default"] or {}
+	-- Read stats from the Info Configuration inside ReplicatedStorage.Brainrots[name]
+	local entry = readInfoConfig(brainrotName)
 
 	local hum, _ = getHumanoidAndHRP(model)
-	local info = ensureEnemyInfo(model)
+	local enemyInfo = ensureEnemyInfo(model)
 
 	local displayName = entry.DisplayName or brainrotName
 
+	-- Rarity: Info stores as number (1-6). Convert to name.
+	local rarityNum = tonumber(entry.Rarity) or 1
 	local rarityName = "Common"
 	if type(entry.RarityName) == "string" and entry.RarityName ~= "" then
 		rarityName = entry.RarityName
-	elseif type(entry.Rarity) == "string" and entry.Rarity ~= "" then
-		rarityName = entry.Rarity
 	elseif type(entry.Rarity) == "number" then
 		rarityName = rarityNameFromNumber(entry.Rarity)
 	end
 
-	local rarityNum = entry.Rarity
-	if type(rarityNum) ~= "number" then
-		local map = { Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5, Mythic = 6 }
-		rarityNum = map[rarityName] or 1
+	local price = tonumber(entry.Price) or 0
+
+	-- Health: read from the Body template Humanoid, fall back to Info or 100
+	local maxHealth = tonumber(entry.Health) or 100
+	local bodyTemplate = getBodyTemplate(brainrotName)
+	if bodyTemplate then
+		local bodyHum = bodyTemplate:FindFirstChildOfClass("Humanoid")
+		if bodyHum and bodyHum.MaxHealth > 0 then
+			maxHealth = bodyHum.MaxHealth
+		end
 	end
 
-	local price = tonumber(entry.Price) or 0
-	local maxHealth = tonumber(entry.Health) or 100
-
-	local walk = tonumber(entry.Walkspeed or entry.WalkSpeed) or 16
-	local run = tonumber(entry.Runspeed or entry.RunSpeed) or (walk + 6)
-	local atkSpeed = tonumber(entry.Attackspeed or entry.AttackSpeed) or 20
+	local walk = tonumber(entry.Walkspeed) or 16
+	local run = tonumber(entry.Runspeed) or (walk + 6)
+	local atkSpeed = tonumber(entry.Attackspeed) or 20
 	local healRate = tonumber(entry.HealRate) or 0
 
-	local personality = entry.Personality or "Passive"
+	local personality = entry.Personality
 	if type(personality) ~= "string" or personality == "" then
 		personality = "Passive"
 	end
@@ -485,26 +493,26 @@ function BrainrotService:_applyBaseline(model: Model, brainrotName: string): (nu
 	hum.Health = maxHealth
 	hum.WalkSpeed = walk
 
-	info:SetAttribute("DisplayName", displayName)
-	info:SetAttribute("Price", price)
+	enemyInfo:SetAttribute("DisplayName", displayName)
+	enemyInfo:SetAttribute("Price", price)
+	enemyInfo:SetAttribute("Rarity", rarityNum)
+	enemyInfo:SetAttribute("RarityName", rarityName)
+	enemyInfo:SetAttribute("Walkspeed", walk)
+	enemyInfo:SetAttribute("Runspeed", run)
+	enemyInfo:SetAttribute("Attackspeed", atkSpeed)
+	enemyInfo:SetAttribute("HealRate", healRate)
+	enemyInfo:SetAttribute("Personality", personality)
 
-	info:SetAttribute("Rarity", rarityNum)
-	info:SetAttribute("RarityName", rarityName)
-
-	info:SetAttribute("Walkspeed", walk)
-	info:SetAttribute("Runspeed", run)
-	info:SetAttribute("Attackspeed", atkSpeed)
-	info:SetAttribute("HealRate", healRate)
-	info:SetAttribute("Personality", personality)
-
-	if entry.AttackDamage ~= nil then info:SetAttribute("AttackDamage", entry.AttackDamage) end
-	if entry.AttackRange ~= nil then info:SetAttribute("AttackRange", entry.AttackRange) end
-	if entry.AttackCooldown ~= nil then info:SetAttribute("AttackCooldown", entry.AttackCooldown) end
+	if entry.AttackDamage ~= nil then enemyInfo:SetAttribute("AttackDamage", entry.AttackDamage) end
+	if entry.AttackRange ~= nil then enemyInfo:SetAttribute("AttackRange", entry.AttackRange) end
+	if entry.AttackCooldown ~= nil then enemyInfo:SetAttribute("AttackCooldown", entry.AttackCooldown) end
 
 	local totalValue = price
 	if totalValue <= 0 then
 		totalValue = math.max(1, maxHealth)
 	end
+
+	dprint("ApplyBaseline:", brainrotName, "HP=", maxHealth, "Price=", price, "Rarity=", rarityName, "Walk=", walk)
 
 	return maxHealth, totalValue, rarityName
 end
@@ -573,7 +581,7 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 	local combat = self.Services and self.Services.CombatService
 	if combat and type(combat.RegisterBrainrot) == "function" then
 		pcall(function()
-			combat:RegisterBrainrot(guid, hum, hrp, maxHealth, totalValue, rarityName)
+			combat:RegisterBrainrot(guid, hum, hrp, maxHealth, totalValue, rarityName, brainrotName)
 		end)
 	else
 		dwarn("CombatService missing or RegisterBrainrot missing; no payouts will occur.")

@@ -75,14 +75,9 @@ function InventoryService:GrantTool(player: Player, toolName: string)
 		return profile
 	end)
 
-	if not alreadyOwned then
-		if self.NetService and self.NetService.SendDelta then
-			self.NetService:SendDelta(player, {
-				op = "set",
-				path = "Inventory.WeaponsOwned",
-				value = ownedListCopy,
-			})
-		end
+	if not alreadyOwned and self.NetService then
+		self.NetService:QueueDelta(player, "WeaponsOwned", ownedListCopy)
+		self.NetService:FlushDelta(player)
 	end
 
 	return true
@@ -118,9 +113,10 @@ function InventoryService:RemoveTool(player: Player, toolName: string)
 		if t and t:IsA("Tool") then t:Destroy() end
 	end
 
-	if removed and self.NetService and self.NetService.SendDelta then
-		self.NetService:SendDelta(player, { op = "set", path = "Inventory.WeaponsOwned", value = ownedListCopy })
-		self.NetService:SendDelta(player, { op = "set", path = "Inventory.EquippedWeapon", value = equippedName or "" })
+	if removed and self.NetService then
+		self.NetService:QueueDelta(player, "WeaponsOwned", ownedListCopy)
+		self.NetService:QueueDelta(player, "EquippedWeapon", equippedName or "")
+		self.NetService:FlushDelta(player)
 	end
 
 	return removed
@@ -141,8 +137,9 @@ function InventoryService:EquipWeapon(player: Player, weaponName: string)
 	-- If weaponName empty => unequip
 	if weaponName == "" then
 		self.DataService:SetValue(player, "Inventory.EquippedWeapon", "")
-		if self.NetService and self.NetService.SendDelta then
-			self.NetService:SendDelta(player, { op = "set", path = "Inventory.EquippedWeapon", value = "" })
+		if self.NetService then
+			self.NetService:QueueDelta(player, "EquippedWeapon", "")
+			self.NetService:FlushDelta(player)
 		end
 		return true
 	end
@@ -170,8 +167,9 @@ function InventoryService:EquipWeapon(player: Player, weaponName: string)
 
 	self.DataService:SetValue(player, "Inventory.EquippedWeapon", weaponName)
 
-	if self.NetService and self.NetService.SendDelta then
-		self.NetService:SendDelta(player, { op = "set", path = "Inventory.EquippedWeapon", value = weaponName })
+	if self.NetService then
+		self.NetService:QueueDelta(player, "EquippedWeapon", weaponName)
+		self.NetService:FlushDelta(player)
 	end
 
 	return true

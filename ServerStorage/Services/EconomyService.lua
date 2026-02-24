@@ -35,14 +35,10 @@ function EconomyService:AddCash(player: Player, amount: number, reason: string?)
 		return profile
 	end)
 
-	-- clean delta
-	if self.NetService and self.NetService.SendDelta then
-		self.NetService:SendDelta(player, {
-			op = "set",
-			path = "Currency.Cash",
-			value = newCash,
-			meta = { reason = reason or "AddCash" },
-		})
+	-- Send delta to client
+	if self.NetService then
+		self.NetService:QueueDelta(player, "Cash", newCash)
+		self.NetService:FlushDelta(player)
 	end
 
 	return true
@@ -70,13 +66,9 @@ function EconomyService:SpendCash(player: Player, amount: number)
 		return profile
 	end)
 
-	if ok and self.NetService and self.NetService.SendDelta then
-		self.NetService:SendDelta(player, {
-			op = "set",
-			path = "Currency.Cash",
-			value = clampNonNeg(newCash),
-			meta = { reason = "SpendCash" },
-		})
+	if ok and self.NetService then
+		self.NetService:QueueDelta(player, "Cash", clampNonNeg(newCash))
+		self.NetService:FlushDelta(player)
 	end
 
 	return ok, ok and nil or "InsufficientCash"

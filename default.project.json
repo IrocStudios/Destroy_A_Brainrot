@@ -30,7 +30,11 @@
 
     "StarterPlayer": {
       "$className": "StarterPlayer",
-      "$path": "StarterPlayer"
+
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "$path": "StarterPlayer/StarterPlayerScripts"
+      }
     }
   }
 }

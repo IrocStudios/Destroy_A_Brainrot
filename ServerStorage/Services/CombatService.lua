@@ -9,6 +9,7 @@ type Services = { [string]: any }
 
 type BrainrotRecord = {
 	Guid: string,
+	BrainrotName: string,
 	Humanoid: Humanoid,
 	Root: BasePart,
 	MaxHealth: number,
@@ -65,7 +66,8 @@ function CombatService:RegisterBrainrot(
 	root: BasePart,
 	maxHealth: number?,
 	totalValue: number?,
-	rarityName: string?
+	rarityName: string?,
+	brainrotName: string?
 )
 	assert(type(brainrotGuid) == "string" and brainrotGuid ~= "", "RegisterBrainrot requires guid")
 	assert(humanoid and humanoid:IsA("Humanoid"), "RegisterBrainrot requires Humanoid")
@@ -88,8 +90,11 @@ function CombatService:RegisterBrainrot(
 
 	local rn = (type(rarityName) == "string" and rarityName ~= "") and rarityName or "Common"
 
+	local bn = (type(brainrotName) == "string" and brainrotName ~= "") and brainrotName or "Unknown"
+
 	local rec: BrainrotRecord = {
 		Guid = brainrotGuid,
+		BrainrotName = bn,
 		Humanoid = humanoid,
 		Root = root,
 		MaxHealth = mh,
@@ -275,9 +280,15 @@ function CombatService:_OnBrainrotDied(brainrotGuid: string)
 
 	if topUserId ~= 0 then
 		local killer = Players:GetPlayerByUserId(topUserId)
-		if killer and self.IndexService and self.IndexService.RegisterKill then
-			dprint("RegisterKill:", killer.Name, "brainrot=", brainrotGuid)
-			self.IndexService:RegisterKill(killer, brainrotGuid)
+		if killer and self.IndexService then
+			if type(self.IndexService.RegisterKill) == "function" then
+				dprint("RegisterKill:", killer.Name, "brainrot=", rec.BrainrotName)
+				self.IndexService:RegisterKill(killer, rec.BrainrotName)
+			end
+			if type(self.IndexService.RegisterDiscovery) == "function" then
+				dprint("RegisterDiscovery:", killer.Name, "brainrot=", rec.BrainrotName)
+				self.IndexService:RegisterDiscovery(killer, rec.BrainrotName, nil, rec.Rarity)
+			end
 		end
 
 		if killer and self.RewardService then

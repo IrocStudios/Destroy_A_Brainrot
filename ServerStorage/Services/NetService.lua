@@ -86,6 +86,7 @@ function NetService:Init(services)
 	self._rfCodes    = self.RemoteService:GetFunction("CodesAction")
 	self._rfSettings = self.RemoteService:GetFunction("SettingsAction")
 	self._rfCommand  = self.RemoteService:GetFunction("CommandAction")
+	self._rfDeath    = self.RemoteService:GetFunction("DeathAction")
 
 	self._pending = {}
 end
@@ -137,6 +138,10 @@ function NetService:Start()
 
 	self._rfCommand.OnServerInvoke = function(player, payload)
 		return self:RouteAction("AdminService", "HandleCommand", player, payload)
+	end
+
+	self._rfDeath.OnServerInvoke = function(player, payload)
+		return self:RouteAction("DeathService", "HandleDeathAction", player, payload)
 	end
 
 	local DataService = self.Services.DataService
