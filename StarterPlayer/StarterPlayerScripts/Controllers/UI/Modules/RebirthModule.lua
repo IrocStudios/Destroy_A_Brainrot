@@ -22,10 +22,11 @@ end
 
 local function fmt(n: number): string
 	n = math.floor(n or 0)
-	if n >= 1e6 then return ("%.1fM"):format(n/1e6)
-	elseif n >= 1e3 then return ("%.1fK"):format(n/1e3)
+	if n >= 1e9 then return ("$%.2fb"):format(n / 1e9)
+	elseif n >= 1e6 then return ("$%.2fm"):format(n / 1e6)
+	elseif n >= 1e3 then return ("$%.2fk"):format(n / 1e3)
 	end
-	return tostring(n)
+	return "$" .. tostring(n)
 end
 
 local function getState(ctx: any): any
@@ -108,7 +109,7 @@ function RebirthModule:_onRebirth()
 	local AlertMod = require(script.Parent.AlertModule)
 	AlertMod:Show({
 		title   = "Rebirth?",
-		message = "This will reset your level and cash, but grant permanent bonuses. Are you sure?",
+		message = "This will reset your cash, level, gates, and weapons. You'll earn a permanent cash and XP bonus!",
 		confirm = "Rebirth!",
 		cancel  = "Cancel",
 		callback = function(confirmed: boolean)

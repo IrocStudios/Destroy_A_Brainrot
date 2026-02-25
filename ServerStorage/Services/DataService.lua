@@ -237,6 +237,7 @@ local function MakeProfileTemplate()
 			TotalCashEarned = 0,
 			TotalXPEarned = 0,
 			TotalPlaytimeSeconds = 0,
+			Deaths = 0,
 		},
 	}
 end

@@ -28,16 +28,23 @@ function EconomyService:AddCash(player: Player, amount: number, reason: string?)
 	end
 
 	local newCash: number = 0
+	local newTotalEarned: number = 0
 	self.DataService:Update(player, function(profile)
 		local cur = profile.Currency.Cash or 0
 		newCash = cur + amount
 		profile.Currency.Cash = newCash
+
+		-- Track lifetime earnings
+		profile.Stats = profile.Stats or {}
+		profile.Stats.TotalCashEarned = (profile.Stats.TotalCashEarned or 0) + amount
+		newTotalEarned = profile.Stats.TotalCashEarned
 		return profile
 	end)
 
-	-- Send delta to client
+	-- Send deltas to client
 	if self.NetService then
 		self.NetService:QueueDelta(player, "Cash", newCash)
+		self.NetService:QueueDelta(player, "TotalCashEarned", newTotalEarned)
 		self.NetService:FlushDelta(player)
 	end
 

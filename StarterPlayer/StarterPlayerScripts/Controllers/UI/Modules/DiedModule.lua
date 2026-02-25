@@ -19,7 +19,9 @@
 --       Drop2 [TextButton]    ← secondary Drop button
 --     shadow [Frame]           ← glow/flash overlay
 
-local TweenService = game:GetService("TweenService")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting         = game:GetService("Lighting")
 
 local DiedModule = {}
 DiedModule.__index = DiedModule
@@ -183,6 +185,32 @@ function DiedModule:_show(payload: any)
 		self._frameOpenTween:Play()
 	end
 
+	-- Unlock mouse, show cursor with default icon, and guard against other systems
+	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+	UserInputService.MouseIconEnabled = true
+	UserInputService.MouseIcon = ""
+	if self._mouseGuard then self._mouseGuard:Disconnect() end
+	self._mouseGuard = UserInputService:GetPropertyChangedSignal("MouseBehavior"):Connect(function()
+		if self._open then
+			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		end
+	end)
+	if self._iconGuard then self._iconGuard:Disconnect() end
+	self._iconGuard = UserInputService:GetPropertyChangedSignal("MouseIconEnabled"):Connect(function()
+		if self._open then
+			UserInputService.MouseIconEnabled = true
+		end
+	end)
+
+	-- Blur: enable and tween Size 0 → 12 over 1 second
+	local blur = Lighting:FindFirstChild("Blur")
+	if blur and blur:IsA("BlurEffect") then
+		blur.Enabled = true
+		blur.Size = 0
+		self._blurTween = TweenService:Create(blur, TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = 12 })
+		self._blurTween:Play()
+	end
+
 	-- ── Death icon: pop scale 0→1, then rock ±5° ─────────────────────────
 	self:_startIconAnim()
 
@@ -195,6 +223,27 @@ function DiedModule:_hide()
 	if not self._open then return end  -- already closed, prevent double-close
 	self._open = false
 	self._processing = false
+
+	-- Release mouse guards (let other systems control mouse again)
+	if self._mouseGuard then
+		self._mouseGuard:Disconnect()
+		self._mouseGuard = nil
+	end
+	if self._iconGuard then
+		self._iconGuard:Disconnect()
+		self._iconGuard = nil
+	end
+
+	-- Blur: instantly disable and reset
+	if self._blurTween then
+		self._blurTween:Cancel()
+		self._blurTween = nil
+	end
+	local blur = Lighting:FindFirstChild("Blur")
+	if blur and blur:IsA("BlurEffect") then
+		blur.Size = 0
+		blur.Enabled = false
+	end
 
 	-- Stop animations
 	self:_stopIconAnim()

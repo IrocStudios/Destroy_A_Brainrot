@@ -89,6 +89,18 @@ function DeathService:_onDeath(player: Player)
 	if self._dead[player] then return end  -- prevent double-fire
 	self._dead[player] = true
 
+	-- Increment lifetime death counter
+	local newDeaths = 0
+	if self.DataService and type(self.DataService.Increment) == "function" then
+		self.DataService:Increment(player, "Stats.Deaths", 1)
+		local v = self.DataService:GetValue(player, "Stats.Deaths")
+		newDeaths = tonumber(v) or 0
+	end
+	if self.NetService then
+		self.NetService:QueueDelta(player, "Deaths", newDeaths)
+		-- Don't flush yet — the Notify below will be a separate event
+	end
+
 	-- Calculate keepCost from player level
 	local level = 1
 	if self.DataService and type(self.DataService.GetValue) == "function" then
@@ -99,10 +111,11 @@ function DeathService:_onDeath(player: Player)
 	end
 	local keepCost = level * 1  -- $1 per level  (simple formula, expandable later)
 
-	print(("[DeathService] %s died. Level=%d  KeepCost=$%d"):format(player.Name, level, keepCost))
+	print(("[DeathService] %s died. Deaths=%d  Level=%d  KeepCost=$%d"):format(player.Name, newDeaths, level, keepCost))
 
-	-- Notify client to open the Died frame
+	-- Flush stats delta + notify client to open the Died frame
 	if self.NetService then
+		self.NetService:FlushDelta(player)
 		self.NetService:Notify(player, {
 			type     = "died",
 			keepCost = keepCost,

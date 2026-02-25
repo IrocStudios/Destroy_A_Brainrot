@@ -196,6 +196,7 @@ function NetService:BuildSnapshotFromProfile(profile)
 		Index = deepCopy(profile.Index or {}),
 		Rewards = deepCopy(profile.Rewards or {}),
 		Settings = deepCopy(profile.Settings or {}),
+		Stats = deepCopy(profile.Stats or {}),
 	}
 end
 

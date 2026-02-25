@@ -29,6 +29,7 @@ function IndexService:RegisterKill(player: Player, brainrotName: string)
 
 	local newCount = 0
 	local mapCopy = nil
+	local newTotalKills = 0
 
 	self.DataService:Update(player, function(profile)
 		profile.Index = profile.Index or {}
@@ -38,11 +39,17 @@ function IndexService:RegisterKill(player: Player, brainrotName: string)
 		m[brainrotName] = (m[brainrotName] or 0) + 1
 		newCount = m[brainrotName]
 		mapCopy = m
+
+		-- Increment lifetime kill counter
+		profile.Stats = profile.Stats or {}
+		profile.Stats.TotalKills = (profile.Stats.TotalKills or 0) + 1
+		newTotalKills = profile.Stats.TotalKills
 		return profile
 	end)
 
 	if self.NetService then
 		self.NetService:QueueDelta(player, "BrainrotsKilled", mapCopy)
+		self.NetService:QueueDelta(player, "TotalKills", newTotalKills)
 		self.NetService:FlushDelta(player)
 	end
 

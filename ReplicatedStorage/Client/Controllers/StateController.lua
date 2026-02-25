@@ -94,6 +94,15 @@ function StateController:ApplyDelta(deltaList)
 		elseif key == "SFXOn" then
 			self.State.Settings = self.State.Settings or {}
 			self.State.Settings.SFXOn = d.v
+		elseif key == "TotalKills" then
+			self.State.Stats = self.State.Stats or {}
+			self.State.Stats.TotalKills = d.v
+		elseif key == "TotalCashEarned" then
+			self.State.Stats = self.State.Stats or {}
+			self.State.Stats.TotalCashEarned = d.v
+		elseif key == "Deaths" then
+			self.State.Stats = self.State.Stats or {}
+			self.State.Stats.Deaths = d.v
 		end
 	end
 	self.Changed:Fire(self.State, deltaList)

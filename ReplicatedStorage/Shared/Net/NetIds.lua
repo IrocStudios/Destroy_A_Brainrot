@@ -51,6 +51,11 @@ NetIds.Encode = {
 
 	MusicOn = 40,
 	SFXOn = 41,
+
+	-- Stats (lifetime counters)
+	TotalKills = 50,
+	TotalCashEarned = 51,
+	Deaths = 52,
 }
 
 NetIds.Decode = {}

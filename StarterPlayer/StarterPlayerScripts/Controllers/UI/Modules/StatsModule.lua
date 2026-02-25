@@ -1,83 +1,134 @@
 --!strict
 -- StatsModule.lua  |  Frame: Stats
--- Shows player lifetime stats: kills, cash, discoveries, rebirths.
--- Updates live whenever state changes.
+-- Shows player lifetime stats. Updates live whenever state changes.
 --
--- WIRE-UP NOTES:
---   Frame "Stats"
---     ├─ KillsLabel       (TextLabel)
---     ├─ CashLabel        (TextLabel)
---     ├─ DiscoveriesLabel (TextLabel)
---     ├─ RebirthsLabel    (TextLabel)
---     ├─ LevelLabel       (TextLabel)
---     └─ XButton      (TextButton)
+-- WIRE-UP (Studio frame hierarchy):
+--   Stats [Frame]
+--     Canvas [CanvasGroup]
+--       Header [Frame] > Title [TextLabel]
+--     Container [ScrollingFrame]
+--       TotalCash [Frame] > Main > Frame > Title [TextLabel] > Title [TextLabel shadow]
+--       Rebirths  [Frame] > Main > Frame > Title [TextLabel] > Title [TextLabel shadow]
+--       Gifts     [Frame] > Main > Frame > Title [TextLabel] > Title [TextLabel shadow]
+--       Captured  [Frame] > Main > Frame > Title [TextLabel] > Title [TextLabel shadow]
+--       Deaths    [Frame] > Main > Frame > Title [TextLabel] > Title [TextLabel shadow]
+--     XButton [TextButton]
 
 local StatsModule = {}
 StatsModule.__index = StatsModule
 
-local function find(parent: Instance, name: string): Instance?
-	return parent:FindFirstChild(name, true)
-end
-
+-- Number formatting — project standard: lowercase, 2 decimal places
 local function fmt(n: number): string
 	n = math.floor(n or 0)
-	if n >= 1e9 then return ("%.1fB"):format(n/1e9)
-	elseif n >= 1e6 then return ("%.1fM"):format(n/1e6)
-	elseif n >= 1e3 then return ("%.1fK"):format(n/1e3)
+	if n >= 1e9 then return ("$%.2fb"):format(n / 1e9)
+	elseif n >= 1e6 then return ("$%.2fm"):format(n / 1e6)
+	elseif n >= 1e3 then return ("$%.2fk"):format(n / 1e3)
 	end
-	return tostring(n)
+	return "$" .. tostring(n)
 end
 
-local function getState(ctx: any): any
-	return (ctx.State and ctx.State.State) or {}
+local function fmtInt(n: number): string
+	return tostring(math.floor(n or 0))
 end
 
-function StatsModule:_refresh(state: any)
-	if not self._frame then return end
-	local s    = getState(self._ctx)
-	local prog = s.Progression or {}
-	local curr = s.Currency    or {}
-	local idx  = s.Index       or {}
+-- ── Stat row definitions ──────────────────────────────────────────────────
+-- Each entry maps a frame name to:  { prefix, formatter, getValue(state) }
 
-	-- BrainrotsKilled is a map {[brainrotId] = count} — sum all values
-	local kills = 0
-	if type(idx.BrainrotsKilled) == "table" then
-		for _, count in pairs(idx.BrainrotsKilled) do
-			kills += (tonumber(count) or 0)
-		end
-	elseif type(idx.BrainrotsKilled) == "number" then
-		kills = idx.BrainrotsKilled
-	end
-
-	-- BrainrotsDiscovered is a map {[brainrotId] = true} — count keys
-	local discoveries = 0
-	if type(idx.BrainrotsDiscovered) == "table" then
-		for _ in pairs(idx.BrainrotsDiscovered) do
-			discoveries += 1
-		end
-	end
-	local cash     = curr.Cash          or 0
-	local rebirths = prog.Rebirths      or 0
-	local level    = prog.Level         or 0
-
-	local function set(name, text)
-		local lbl = find(self._frame, name) :: TextLabel?
-		if lbl then
-			local prev = lbl.Text
-			lbl.Text = text
-			-- Pulse label briefly when value changes
-			if prev ~= text then
-				local h = self._ctx.UI.Effects.Pulse(lbl, 4, 0.05)
-				task.delay(0.5, function() h:Destroy() end)
+local STAT_ROWS = {
+	{
+		frame   = "TotalCash",
+		prefix  = "Total Cash: ",
+		format  = fmt,
+		getValue = function(s: any): number
+			local stats = s.Stats or {}
+			return tonumber(stats.TotalCashEarned) or 0
+		end,
+	},
+	{
+		frame   = "Rebirths",
+		prefix  = "Rebirths: ",
+		format  = fmtInt,
+		getValue = function(s: any): number
+			local prog = s.Progression or {}
+			return tonumber(prog.Rebirths) or 0
+		end,
+	},
+	{
+		frame   = "Gifts",
+		prefix  = "Gifts Opened: ",
+		format  = fmtInt,
+		getValue = function(s: any): number
+			local rewards = s.Rewards or {}
+			local gifts = rewards.Gifts or {}
+			local nextIdx = tonumber(gifts.NextIndex) or 1
+			return math.max(0, nextIdx - 1)
+		end,
+	},
+	{
+		frame   = "Captured",
+		prefix  = "Captured: ",
+		format  = fmtInt,
+		getValue = function(s: any): number
+			local idx = s.Index or {}
+			local discovered = idx.BrainrotsDiscovered
+			if type(discovered) ~= "table" then return 0 end
+			local count = 0
+			for _ in pairs(discovered) do
+				count += 1
 			end
+			return count
+		end,
+	},
+	{
+		frame   = "Deaths",
+		prefix  = "Deaths: ",
+		format  = fmtInt,
+		getValue = function(s: any): number
+			local stats = s.Stats or {}
+			return tonumber(stats.Deaths) or 0
+		end,
+	},
+}
+
+-- ── Helpers ────────────────────────────────────────────────────────────────
+
+-- Navigate: StatRow > Main > Frame > Title (TextLabel)
+-- Shadow:   Title > Title (TextLabel)
+local function findLabel(statFrame: Instance): (TextLabel?, TextLabel?)
+	local main = statFrame:FindFirstChild("Main")
+	if not main then return nil, nil end
+	local inner = main:FindFirstChild("Frame")
+	if not inner then return nil, nil end
+	local title = inner:FindFirstChild("Title")
+	if not title or not title:IsA("TextLabel") then return nil, nil end
+	local shadow = title:FindFirstChild("Title")
+	if shadow and shadow:IsA("TextLabel") then
+		return title, shadow
+	end
+	return title, nil
+end
+
+-- ── Lifecycle ──────────────────────────────────────────────────────────────
+
+function StatsModule:_refresh()
+	if not self._frame then return end
+	local state = (self._ctx.State and self._ctx.State.State) or {}
+
+	for _, row in STAT_ROWS do
+		local statFrame = self._container and self._container:FindFirstChild(row.frame)
+		if not statFrame then continue end
+
+		local value = row.getValue(state)
+		local text = row.prefix .. row.format(value)
+
+		local label, shadow = findLabel(statFrame)
+		if label then
+			label.Text = text
+		end
+		if shadow then
+			shadow.Text = text
 		end
 	end
-
-	set("KillsLabel",       "Kills: "        .. fmt(kills))
-	set("CashLabel",        "Cash Earned: $" .. fmt(cash))
-	set("DiscoveriesLabel", "Discovered: "   .. tostring(discoveries))
-	set("RebirthsLabel",    "Rebirths: "     .. tostring(rebirths))
-	set("LevelLabel",       "Level: "        .. tostring(level))
 end
 
 function StatsModule:Init(ctx: any)
@@ -86,20 +137,26 @@ function StatsModule:Init(ctx: any)
 	self._frame   = ctx.FramesFolder and ctx.FramesFolder:FindFirstChild("Stats")
 	if not self._frame then warn("[StatsModule] Frame 'Stats' not found") return end
 
-	local closeBtn = find(self._frame, "XButton")
-	if closeBtn then
-		self._janitor:Add((closeBtn :: GuiButton).MouseButton1Click:Connect(function()
+	self._container = self._frame:FindFirstChild("Container")
+
+	-- Close button
+	local closeBtn = self._frame:FindFirstChild("XButton")
+	if closeBtn and closeBtn:IsA("GuiButton") then
+		self._janitor:Add(closeBtn.MouseButton1Click:Connect(function()
 			if ctx.Router then ctx.Router:Close("Stats") end
 		end))
 	end
 
-	self:_refresh({})
+	-- Initial fill
+	self:_refresh()
 end
 
 function StatsModule:Start()
 	if not self._frame then return end
-	self._janitor:Add(self._ctx.State.Changed:Connect(function(state, _)
-		self:_refresh(state)
+
+	-- Update on every state change
+	self._janitor:Add(self._ctx.State.Changed:Connect(function(_state, _deltas)
+		self:_refresh()
 	end))
 end
 
