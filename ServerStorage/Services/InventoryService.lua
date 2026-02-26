@@ -338,15 +338,54 @@ function InventoryService:_buyWeapon(player: Player, weaponKey: string, cost: nu
 		})
 	end
 
-	-- DEV: Grant all 6 test weapons for free on AK12 purchase
+	-- DEV: Grant all 7 test weapons for free on AK12 purchase
+	-- Each fires its own Purchased notification so the queue system plays them all.
+	-- Transcendent comes last after a 6-second pause for dramatic effect.
 	if weaponKey == "AK12" then
-		local testWeapons = { "testcommon", "testuncommon", "testrare", "testepic", "testlegendary", "testmythic" }
-		for _, tw in ipairs(testWeapons) do
-			if not self:OwnsWeapon(player, tw) then
-				self:GrantTool(player, tw)
-				print(("[InventoryService] DEV: Granted free %s to %s"):format(tw, player.Name))
+		task.spawn(function()
+			local testWeapons = {
+				{ key = "testcommon",      name = "Test Common",       rarity = 1 },
+				{ key = "testuncommon",    name = "Test Uncommon",     rarity = 2 },
+				{ key = "testrare",        name = "Test Rare",         rarity = 3 },
+				{ key = "testepic",        name = "Test Epic",         rarity = 4 },
+				{ key = "testlegendary",   name = "Test Legendary",    rarity = 5 },
+				{ key = "testmythic",      name = "Test Mythic",       rarity = 6 },
+			}
+			for _, tw in ipairs(testWeapons) do
+				local twIsNew = not self:OwnsWeapon(player, tw.key)
+				if twIsNew then
+					self:GrantTool(player, tw.key)
+					print(("[InventoryService] DEV: Granted free %s to %s"):format(tw.key, player.Name))
+					if self.NetService then
+						self.NetService:Notify(player, {
+							type      = "purchased",
+							weaponKey = tw.key,
+							isNew     = true,
+							name      = tw.name,
+							rarity    = tw.rarity,
+						})
+					end
+				end
 			end
-		end
+
+			-- Wait, then grant + show Transcendent separately
+			task.wait(6)
+			local twKey = "testtranscendent"
+			local twIsNew = not self:OwnsWeapon(player, twKey)
+			if twIsNew then
+				self:GrantTool(player, twKey)
+				print(("[InventoryService] DEV: Granted free %s to %s"):format(twKey, player.Name))
+				if self.NetService then
+					self.NetService:Notify(player, {
+						type      = "purchased",
+						weaponKey = twKey,
+						isNew     = true,
+						name      = "Test Transcendent",
+						rarity    = 7,
+					})
+				end
+			end
+		end)
 	end
 
 	return { ok = true, isNew = isNew }

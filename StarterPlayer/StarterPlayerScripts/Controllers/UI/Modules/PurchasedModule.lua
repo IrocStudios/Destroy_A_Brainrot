@@ -42,7 +42,10 @@ local function darkenColorSequence(cs: ColorSequence, factor: number): ColorSequ
 	return ColorSequence.new(kps)
 end
 
+local CollectionService = game:GetService("CollectionService")
+
 local function applyRarityGradients(parent: Instance, rarityName: string)
+	local isTranscendent = rarityName == "Transcendent"
 	for _, desc in parent:GetDescendants() do
 		if desc:IsA("UIGradient") then
 			if desc.Name == "RarityGradient" then
@@ -54,19 +57,34 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 					end
 					desc.Color = color
 				end
+				-- Tag/untag for rainbow animation (fill only)
+				if isTranscendent then
+					CollectionService:AddTag(desc, "RainbowGradient")
+				else
+					CollectionService:RemoveTag(desc, "RainbowGradient")
+				end
 			elseif desc.Name == "RarityGradientStroke" then
 				local source = _rarityConfigInst:FindFirstChild(rarityName .. "Stroke")
 				if source and source:IsA("UIGradient") then
 					desc.Color = source.Color
+				end
+				-- Tag/untag for rainbow animation (stroke only)
+				if isTranscendent then
+					CollectionService:AddTag(desc, "RainbowGradient")
+					desc.Rotation = 90
+				else
+					CollectionService:RemoveTag(desc, "RainbowGradient")
 				end
 			end
 		end
 	end
 end
 
-local DISPLAY_SECONDS = 5     -- how long the popup stays fully visible
-local SHRINK_DURATION = 1.0   -- how long the shrink-out tween takes
-local SPIN_DURATION   = 12    -- seconds per full shine rotation
+local DISPLAY_SECONDS  = 4     -- how long the popup stays fully visible
+local SHRINK_DURATION  = 1.0   -- how long the shrink-out tween takes
+local SPIN_DURATION    = 12    -- seconds per full shine rotation
+local BOUNCE_UP_TIME   = 0.15  -- tween to 1.1
+local BOUNCE_DOWN_TIME = 0.1   -- settle to 1
 
 local RARITY_NAMES = {
 	[1] = "Common",
@@ -75,6 +93,7 @@ local RARITY_NAMES = {
 	[4] = "Epic",
 	[5] = "Legendary",
 	[6] = "Mythic",
+	[7] = "Transcendent",
 }
 
 local function find(parent: Instance, name: string): Instance?
@@ -90,6 +109,8 @@ function PurchasedModule:Init(ctx: any)
 	self._spinTween   = nil :: Tween?
 	self._shrinkTween = nil :: Tween?
 	self._open        = false
+	self._showing     = false -- true while a purchase sequence is active (show → shrink → done)
+	self._queue       = {}    -- queued payloads waiting to show
 	self._frame       = ctx.FramesFolder and ctx.FramesFolder:FindFirstChild("Purchased")
 
 	if not self._frame then
@@ -138,17 +159,39 @@ function PurchasedModule:Start()
 	local notifyRE = self._ctx.Net:GetEvent("Notify")
 	self._janitor:Add(notifyRE.OnClientEvent:Connect(function(payload)
 		if type(payload) == "table" and payload.type == "purchased" then
-			self:Show(payload)
+			self:_enqueue(payload)
 		end
 	end))
 
 	print("[PurchasedModule] Start OK")
 end
 
+-- ── Queue ────────────────────────────────────────────────────────────────────
+
+function PurchasedModule:_enqueue(payload: any)
+	if self._showing then
+		-- Another purchase is playing — queue this one
+		table.insert(self._queue, payload)
+		return
+	end
+	self:_showImmediate(payload)
+end
+
+function PurchasedModule:_playNext()
+	if #self._queue == 0 then
+		self._showing = false
+		return
+	end
+	local next = table.remove(self._queue, 1)
+	self:_showImmediate(next)
+end
+
 -- ── Show / Hide ──────────────────────────────────────────────────────────────
 
-function PurchasedModule:Show(payload: any)
+function PurchasedModule:_showImmediate(payload: any)
 	if not self._frame then return end
+
+	self._showing = true
 
 	local weaponKey  = tostring(payload.weaponKey or "")
 	local isNew      = payload.isNew == true
@@ -196,10 +239,18 @@ function PurchasedModule:Show(payload: any)
 	-- Cancel any previous shrink / auto-close
 	self:_cancelTimers()
 
-	-- Open via Router (bounce tween in)
+	-- Open directly (bypass Router — this is a toast, not a menu frame)
 	self._open = true
-	if self._ctx.Router then
-		self._ctx.Router:Open("Purchased")
+	self._frame.Visible = true
+	if self._uiScale then
+		(self._uiScale :: UIScale).Scale = 0
+		local bounceInfo = TweenInfo.new(BOUNCE_UP_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		local t1 = TweenService:Create(self._uiScale :: Instance, bounceInfo, { Scale = 1.1 })
+		t1.Completed:Once(function()
+			local settleInfo = TweenInfo.new(BOUNCE_DOWN_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
+			TweenService:Create(self._uiScale :: Instance, settleInfo, { Scale = 1 }):Play()
+		end)
+		t1:Play()
 	end
 
 	-- After DISPLAY_SECONDS, smoothly shrink to 0 then hide
@@ -232,14 +283,15 @@ function PurchasedModule:_shrinkOut()
 	self._shrinkTween = TweenService:Create(self._uiScale :: Instance, info, { Scale = 0 })
 	self._shrinkTween.Completed:Once(function()
 		self._shrinkTween = nil
-		-- We already animated to scale 0, so hide directly without Router:Close
 		self._open = false
 		self:_stopShine()
 		self._frame.Visible = false
-		-- Reset UIScale to 1 so the next Show() / Router:Open works correctly
+		-- Reset UIScale so the next bounce-in starts clean
 		if self._uiScale then
 			(self._uiScale :: UIScale).Scale = 1
 		end
+		-- Play next queued purchase if any
+		self:_playNext()
 	end)
 	self._shrinkTween:Play()
 end
@@ -251,10 +303,10 @@ function PurchasedModule:_hide()
 
 	self:_cancelTimers()
 	self:_stopShine()
+	self._frame.Visible = false
 
-	if self._ctx.Router then
-		self._ctx.Router:Close("Purchased")
-	end
+	-- Play next queued purchase if any
+	self:_playNext()
 end
 
 -- ── Icon ─────────────────────────────────────────────────────────────────────

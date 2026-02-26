@@ -12,6 +12,7 @@ local RarityConfig = {
 		"Epic",
 		"Legendary",
 		"Mythic",
+		"Transcendent",
 	},
 
 	-- If a service needs a default rarity.
@@ -128,6 +129,36 @@ local RarityConfig = {
 			},
 
 			AnnouncementStyle = "Global",
+		},
+
+		-- Rainbow animated tier — highest rarity
+		Transcendent = {
+			DisplayName = "Transcendent",
+			Color = Color3.fromRGB(255, 255, 255), -- white fallback; real color is the animated rainbow gradient
+
+			HealthMultiplier = 5.00,
+			ValueMultiplier = 6.50,
+			XPMultiplier = 5.00,
+
+			GiftChanceMultiplier = 8.00,
+			SpawnWeight = 0, -- never spawns naturally; special reward only
+
+			UIGradient = {
+				-- Rainbow keypoints for fill gradient (animated by RainbowRarityAnimator)
+				Colors = {
+					Color3.fromRGB(255, 0, 0),
+					Color3.fromRGB(255, 165, 0),
+					Color3.fromRGB(255, 255, 0),
+					Color3.fromRGB(0, 255, 0),
+					Color3.fromRGB(0, 150, 255),
+					Color3.fromRGB(130, 0, 255),
+					Color3.fromRGB(255, 0, 200),
+					Color3.fromRGB(255, 0, 0), -- wrap back to red for seamless loop
+				},
+			},
+
+			AnnouncementStyle = "Global",
+			Animated = true, -- signals UI to apply rainbow offset animation
 		},
 	},
 }

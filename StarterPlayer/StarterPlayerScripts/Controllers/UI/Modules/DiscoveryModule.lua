@@ -40,7 +40,10 @@ local function darkenColorSequence(cs: ColorSequence, factor: number): ColorSequ
 	return ColorSequence.new(kps)
 end
 
+local CollectionService = game:GetService("CollectionService")
+
 local function applyRarityGradients(parent: Instance, rarityName: string)
+	local isTranscendent = rarityName == "Transcendent"
 	for _, desc in parent:GetDescendants() do
 		if desc:IsA("UIGradient") then
 			if desc.Name == "RarityGradient" then
@@ -52,10 +55,21 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 					end
 					desc.Color = color
 				end
+				if isTranscendent then
+					CollectionService:AddTag(desc, "RainbowGradient")
+				else
+					CollectionService:RemoveTag(desc, "RainbowGradient")
+				end
 			elseif desc.Name == "RarityGradientStroke" then
 				local source = _rarityConfigInst:FindFirstChild(rarityName .. "Stroke")
 				if source and source:IsA("UIGradient") then
 					desc.Color = source.Color
+				end
+				if isTranscendent then
+					CollectionService:AddTag(desc, "RainbowGradient")
+					desc.Rotation = 90
+				else
+					CollectionService:RemoveTag(desc, "RainbowGradient")
 				end
 			end
 		end
