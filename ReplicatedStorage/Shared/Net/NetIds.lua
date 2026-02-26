@@ -28,6 +28,7 @@ NetIds.RemoteFunctions = {
 	SettingsAction  = "SettingsAction",
 	CommandAction   = "CommandAction",
 	DeathAction     = "DeathAction",
+	GiftAction      = "GiftAction",
 }
 
 
@@ -41,6 +42,7 @@ NetIds.Encode = {
 
 	WeaponsOwned = 10,
 	EquippedWeapon = 11,
+	SelectedWeapons = 12,
 
 	BrainrotsKilled = 20,
 	BrainrotsDiscovered = 21,
@@ -56,6 +58,9 @@ NetIds.Encode = {
 	TotalKills = 50,
 	TotalCashEarned = 51,
 	Deaths = 52,
+
+	-- Gifts (player-to-player)
+	PendingGiftsCount = 60,
 }
 
 NetIds.Decode = {}

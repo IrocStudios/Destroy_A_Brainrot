@@ -73,6 +73,9 @@ function StateController:ApplyDelta(deltaList)
 		elseif key == "EquippedWeapon" then
 			self.State.Inventory = self.State.Inventory or {}
 			self.State.Inventory.EquippedWeapon = d.v
+		elseif key == "SelectedWeapons" then
+			self.State.Inventory = self.State.Inventory or {}
+			self.State.Inventory.SelectedWeapons = d.v
 		elseif key == "BrainrotsKilled" then
 			self.State.Index = self.State.Index or {}
 			self.State.Index.BrainrotsKilled = d.v

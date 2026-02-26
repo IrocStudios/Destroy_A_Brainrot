@@ -18,6 +18,43 @@ local TweenService      = game:GetService("TweenService")
 local IndexModule = {}
 IndexModule.__index = IndexModule
 
+-- ── Rarity gradient helper ──────────────────────────────────────────────────
+local _rarityConfigInst = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("RarityConfig")
+
+local TEXTLABEL_DARKEN = 0.85 -- 15% darker on TextLabels
+
+local function darkenColorSequence(cs: ColorSequence, factor: number): ColorSequence
+	local kps = {}
+	for _, kp in ipairs(cs.Keypoints) do
+		local c = kp.Value
+		table.insert(kps, ColorSequenceKeypoint.new(kp.Time,
+			Color3.new(c.R * factor, c.G * factor, c.B * factor)))
+	end
+	return ColorSequence.new(kps)
+end
+
+local function applyRarityGradients(parent: Instance, rarityName: string)
+	for _, desc in parent:GetDescendants() do
+		if desc:IsA("UIGradient") then
+			if desc.Name == "RarityGradient" then
+				local source = _rarityConfigInst:FindFirstChild(rarityName)
+				if source and source:IsA("UIGradient") then
+					local color = source.Color
+					if desc.Parent and desc.Parent:IsA("TextLabel") then
+						color = darkenColorSequence(color, TEXTLABEL_DARKEN)
+					end
+					desc.Color = color
+				end
+			elseif desc.Name == "RarityGradientStroke" then
+				local source = _rarityConfigInst:FindFirstChild(rarityName .. "Stroke")
+				if source and source:IsA("UIGradient") then
+					desc.Color = source.Color
+				end
+			end
+		end
+	end
+end
+
 -- ── Constants ───────────────────────────────────────────────────────────────
 local ITEMS_PER_ROW = 4
 
@@ -174,6 +211,9 @@ function IndexModule:_buildCard(data: any, discovered: boolean): TextButton
 					shadow.Text = data.rarityName
 				end
 			end
+
+			-- Rarity gradients (fill + stroke)
+			applyRarityGradients(container, data.rarityName)
 		end
 
 		-- ObjectValue

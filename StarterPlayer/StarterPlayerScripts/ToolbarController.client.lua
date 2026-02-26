@@ -30,6 +30,7 @@ local buttonMap: { [Tool]: TextButton } = {} -- Tool → cloned button
 local selectedTool: Tool? = nil
 local dead = false -- true while player is dead; blocks all tool interaction
 local backpackConns: { RBXScriptConnection } = {} -- current backpack listeners
+local _layoutCounter = 0 -- increments per button so newest tools appear last
 
 -- ── Helpers ─────────────────────────────────────────────────────────────────
 local function getCharacter(): Model?
@@ -113,6 +114,7 @@ local function clearAllButtons()
 	end
 	buttonMap = {}
 	selectedTool = nil
+	_layoutCounter = 0
 end
 
 -- ── Button creation / removal ──────────────────────────────────────────────
@@ -143,6 +145,8 @@ local function createButton(tool: Tool)
 		toggleTool(tool)
 	end)
 
+	_layoutCounter += 1
+	button.LayoutOrder = _layoutCounter
 	button.Parent = toolsFrame
 	buttonMap[tool] = button
 	renumberSlots()

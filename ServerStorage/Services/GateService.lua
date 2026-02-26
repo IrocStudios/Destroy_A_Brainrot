@@ -48,6 +48,11 @@ local function readGateConfig(gate)
 		end
 	end
 
+	-- Fallback: use Order attribute if StageId not set
+	if stage == nil then
+		stage = gate:GetAttribute("Order")
+	end
+
 	if typeof(price) ~= "number" then
 		local pv = gate:FindFirstChild("Price")
 		if pv and pv:IsA("NumberValue") then price = pv.Value end
@@ -189,7 +194,7 @@ function GateService:_scanGates()
 	end)
 end
 
-function GateService:_handleGateAction(player, payload)
+function GateService:HandleGateAction(player, payload)
 	if typeof(payload) ~= "table" then return false, "BadPayload" end
 
 	local stageId = payload.stageId or payload.key or payload.stage
@@ -252,21 +257,9 @@ end
 function GateService:Start()
 	self:_scanGates()
 
-	if self.Net then
-		if self.Net.RouteFunction then
-			self.Net:RouteFunction("GateAction", function(player, payload)
-				return self:_handleGateAction(player, payload)
-			end)
-		elseif self.Net.BindFunction then
-			self.Net:BindFunction("GateAction", function(player, payload)
-				return self:_handleGateAction(player, payload)
-			end)
-		elseif self.Net.RegisterFunction then
-			self.Net:RegisterFunction("GateAction", function(player, payload)
-				return self:_handleGateAction(player, payload)
-			end)
-		end
-	end
+	-- NOTE: GateAction RF is already wired up by NetService:Start() via
+	-- RouteAction("GateService", "HandleGateAction", ...). No additional
+	-- binding is needed here.
 end
 
 return GateService

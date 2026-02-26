@@ -187,8 +187,10 @@ local function MakeProfileTemplate()
 		},
 
 		Inventory = {
-			ToolsOwned = {}, -- [ToolName] = true
-			EquippedTool = nil, -- ToolName
+			ToolsOwned = {}, -- [ToolName] = true (legacy)
+			EquippedTool = nil, -- ToolName (legacy)
+			WeaponsOwned = { "StarterWeapon" }, -- weapon folder names the player owns
+			SelectedWeapons = { "StarterWeapon" }, -- weapons active in toolbar (persisted)
 		},
 
 		Index = {

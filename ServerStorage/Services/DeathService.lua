@@ -158,6 +158,7 @@ function DeathService:_handleDrop(player: Player)
 	self.DataService:Update(player, function(profile)
 		profile.Inventory = profile.Inventory or {}
 		profile.Inventory.WeaponsOwned   = {}
+		profile.Inventory.SelectedWeapons = {}
 		profile.Inventory.EquippedWeapon = ""
 		-- Also wipe template-side fields (ToolsOwned / EquippedTool)
 		profile.Inventory.ToolsOwned  = {}
@@ -168,6 +169,7 @@ function DeathService:_handleDrop(player: Player)
 	-- Send deltas so client state updates
 	if self.NetService then
 		self.NetService:QueueDelta(player, "WeaponsOwned", {})
+		self.NetService:QueueDelta(player, "SelectedWeapons", {})
 		self.NetService:QueueDelta(player, "EquippedWeapon", "")
 		self.NetService:FlushDelta(player)
 	end

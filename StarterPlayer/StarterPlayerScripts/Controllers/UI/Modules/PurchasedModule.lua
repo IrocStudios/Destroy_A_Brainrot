@@ -1,29 +1,31 @@
 --!strict
--- DiscoveryModule.lua  |  Frame: Discovery
--- Toast popup when the player discovers a new brainrot for the first time.
--- Triggered by server Notify event with type = "discovery".
--- Auto-closes after AUTO_CLOSE_SECONDS.
+-- PurchasedModule.lua  |  Frame: Purchased
+-- Toast popup when the player purchases a weapon.
+-- Triggered by server Notify event with type = "purchased".
+-- Auto-closes after DISPLAY_SECONDS.
+-- Shows "New!" label + spinning Shine ONLY when isNew == true.
 --
 -- WIRE-UP (Studio frame hierarchy):
---   Discovery [Frame]
+--   Purchased [Frame]
 --     Canvas [CanvasGroup]
 --       Header [Frame]
---         newlable [TextLabel] "New!"
---         Title [TextLabel]          ← brainrot display name
---           Title2 [TextLabel]       ← shadow copy of display name
---         Rarity [TextLabel]         ← rarity name
---         Shines [CanvasGroup]
+--         newlable [TextLabel] "New!"          ← conditional visibility
+--         Title [TextLabel]                     ← weapon display name
+--           Title2 [TextLabel]                  ← shadow copy
+--         Rarity [TextLabel]                    ← rarity name
+--         Shines [CanvasGroup]                  ← conditional visibility
 --           Shine [Frame] x2
 --         Stud [ImageLabel]
 --     IconHolder [Frame]
---       Shine [ImageLabel]           ← spin this
+--       Shine [ImageLabel]                      ← spin this (conditional)
+--       UIAspectRatioConstraint
 --     UIScale [UIScale]
 
 local TweenService     = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local DiscoveryModule = {}
-DiscoveryModule.__index = DiscoveryModule
+local PurchasedModule = {}
+PurchasedModule.__index = PurchasedModule
 
 -- ── Rarity gradient helper ──────────────────────────────────────────────────
 local _rarityConfigInst = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("RarityConfig")
@@ -62,9 +64,18 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 	end
 end
 
-local DISPLAY_SECONDS  = 5     -- how long the popup stays fully visible
-local SHRINK_DURATION  = 1.0   -- how long the shrink-out tween takes
-local SPIN_DURATION    = 12    -- seconds per full shine rotation (slower = more elegant)
+local DISPLAY_SECONDS = 5     -- how long the popup stays fully visible
+local SHRINK_DURATION = 1.0   -- how long the shrink-out tween takes
+local SPIN_DURATION   = 12    -- seconds per full shine rotation
+
+local RARITY_NAMES = {
+	[1] = "Common",
+	[2] = "Uncommon",
+	[3] = "Rare",
+	[4] = "Epic",
+	[5] = "Legendary",
+	[6] = "Mythic",
+}
 
 local function find(parent: Instance, name: string): Instance?
 	return parent:FindFirstChild(name, true)
@@ -72,56 +83,78 @@ end
 
 -- ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-function DiscoveryModule:Init(ctx: any)
+function PurchasedModule:Init(ctx: any)
 	self._ctx         = ctx
 	self._janitor     = ctx.UI.Cleaner.new()
 	self._autoClose   = nil :: thread?
 	self._spinTween   = nil :: Tween?
 	self._shrinkTween = nil :: Tween?
 	self._open        = false
-	self._frame       = ctx.FramesFolder and ctx.FramesFolder:FindFirstChild("Discovery")
+	self._frame       = ctx.FramesFolder and ctx.FramesFolder:FindFirstChild("Purchased")
 
 	if not self._frame then
-		warn("[DiscoveryModule] Frame 'Discovery' not found")
+		warn("[PurchasedModule] Frame 'Purchased' not found")
 		return
 	end
 
 	-- Cache refs
-	self._titleLbl      = find(self._frame, "Title")      :: TextLabel?  -- inside Header
-	self._rarityLbl     = find(self._frame, "Rarity")     :: TextLabel?
-	self._iconHolder    = self._frame:FindFirstChild("IconHolder") :: Frame?
+	self._titleLbl        = find(self._frame, "Title")      :: TextLabel?
+	self._rarityLbl       = find(self._frame, "Rarity")     :: TextLabel?
+	self._iconHolder      = self._frame:FindFirstChild("IconHolder") :: Frame?
 	self._iconHolderShine = self._iconHolder and self._iconHolder:FindFirstChild("Shine") :: ImageLabel?
 	self._uiScale         = self._frame:FindFirstChildOfClass("UIScale") :: UIScale?
+	self._newlable        = find(self._frame, "newlable")   :: TextLabel?  -- Studio typo preserved
+	self._shines          = find(self._frame, "Shines")     :: CanvasGroup?
 
-	-- Brainrots folder in ReplicatedStorage (each child is a Folder with Body + Icon)
-	self._brainrotsFolder = ReplicatedStorage:FindFirstChild("Brainrots")
+	-- Weapons folder in ReplicatedStorage
+	self._weaponsFolder = ReplicatedStorage:FindFirstChild("Weapons")
 
-	-- Discovery sound from LocalResources/Sound
-	local localRes = ctx.RootGui and ctx.RootGui:FindFirstChild("LocalResources")
-	local soundFolder = localRes and localRes:FindFirstChild("Sound")
-	self._discoverySound = soundFolder and soundFolder:FindFirstChild("Discovery_Sound") :: Sound?
+	-- Wire GIVEGUNTEXTBUTTON (dev buy button)
+	local gui = ctx.RootGui
+	if gui then
+		local buyBtn = gui:FindFirstChild("GIVEGUNTEXTBUTTON")
+		if buyBtn and buyBtn:IsA("TextButton") then
+			self._janitor:Add(buyBtn.MouseButton1Click:Connect(function()
+				local weaponActionRF = ctx.Net:GetFunction("WeaponAction")
+				if weaponActionRF then
+					weaponActionRF:InvokeServer({
+						action = "buy",
+						weapon = "AK12",
+						cost   = 5000,
+					})
+				end
+			end))
+			print("[PurchasedModule] GIVEGUNTEXTBUTTON wired")
+		end
+	end
+
+	print("[PurchasedModule] Init OK")
 end
 
-function DiscoveryModule:Start()
+function PurchasedModule:Start()
 	if not self._frame then return end
 
-	-- Listen for server discovery notification
+	-- Listen for server purchased notification
 	local notifyRE = self._ctx.Net:GetEvent("Notify")
 	self._janitor:Add(notifyRE.OnClientEvent:Connect(function(payload)
-		if type(payload) == "table" and payload.type == "discovery" then
+		if type(payload) == "table" and payload.type == "purchased" then
 			self:Show(payload)
 		end
 	end))
+
+	print("[PurchasedModule] Start OK")
 end
 
 -- ── Show / Hide ──────────────────────────────────────────────────────────────
 
-function DiscoveryModule:Show(payload: any)
+function PurchasedModule:Show(payload: any)
 	if not self._frame then return end
 
-	local brainrotId  = tostring(payload.brainrotId or payload.id or "")
-	local displayName = tostring(payload.name or brainrotId)
-	local rarityName  = tostring(payload.rarity or "Common")
+	local weaponKey  = tostring(payload.weaponKey or "")
+	local isNew      = payload.isNew == true
+	local displayName = tostring(payload.name or weaponKey)
+	local rarityNum  = tonumber(payload.rarity) or 1
+	local rarityName = RARITY_NAMES[rarityNum] or "Common"
 
 	-- Populate title + shadow
 	if self._titleLbl then
@@ -140,24 +173,33 @@ function DiscoveryModule:Show(payload: any)
 	-- Rarity gradients (fill + stroke)
 	applyRarityGradients(self._frame, rarityName)
 
-	-- Clone icon from ReplicatedStorage.Brainrots[brainrotId].Icon into IconHolder
-	self:_setIcon(brainrotId)
+	-- Clone icon from ReplicatedStorage.Weapons[weaponKey].Icon into IconHolder
+	self:_setIcon(weaponKey)
 
-	-- Spin the Shine in IconHolder
-	self:_startShine()
+	-- Conditional new/shine
+	if self._newlable then
+		(self._newlable :: TextLabel).Visible = isNew
+	end
+	if self._shines then
+		(self._shines :: CanvasGroup).Visible = isNew
+	end
+	if self._iconHolderShine then
+		(self._iconHolderShine :: ImageLabel).Visible = isNew
+	end
+
+	if isNew then
+		self:_startShine()
+	else
+		self:_stopShine()
+	end
 
 	-- Cancel any previous shrink / auto-close
 	self:_cancelTimers()
 
-	-- Play discovery sound
-	if self._discoverySound then
-		self._discoverySound:Play()
-	end
-
-	-- Open like a menu via Router (bounce tween in)
+	-- Open via Router (bounce tween in)
 	self._open = true
 	if self._ctx.Router then
-		self._ctx.Router:Open("Discovery")
+		self._ctx.Router:Open("Purchased")
 	end
 
 	-- After DISPLAY_SECONDS, smoothly shrink to 0 then hide
@@ -167,7 +209,7 @@ function DiscoveryModule:Show(payload: any)
 	end)
 end
 
-function DiscoveryModule:_cancelTimers()
+function PurchasedModule:_cancelTimers()
 	if self._autoClose then
 		task.cancel(self._autoClose)
 		self._autoClose = nil
@@ -179,10 +221,9 @@ function DiscoveryModule:_cancelTimers()
 end
 
 -- Smoothly scale the popup down to 0, then clean up
-function DiscoveryModule:_shrinkOut()
+function PurchasedModule:_shrinkOut()
 	if not self._open then return end
 	if not self._uiScale then
-		-- No UIScale found, fall back to Router close
 		self:_hide()
 		return
 	end
@@ -192,7 +233,6 @@ function DiscoveryModule:_shrinkOut()
 	self._shrinkTween.Completed:Once(function()
 		self._shrinkTween = nil
 		-- We already animated to scale 0, so hide directly without Router:Close
-		-- (Router:Close would run its own scale-down animation, causing a double-close)
 		self._open = false
 		self:_stopShine()
 		self._frame.Visible = false
@@ -204,7 +244,7 @@ function DiscoveryModule:_shrinkOut()
 	self._shrinkTween:Play()
 end
 
-function DiscoveryModule:_hide()
+function PurchasedModule:_hide()
 	if not self._frame then return end
 	if not self._open then return end
 	self._open = false
@@ -213,37 +253,34 @@ function DiscoveryModule:_hide()
 	self:_stopShine()
 
 	if self._ctx.Router then
-		self._ctx.Router:Close("Discovery")
+		self._ctx.Router:Close("Purchased")
 	end
 end
 
 -- ── Icon ─────────────────────────────────────────────────────────────────────
 
-function DiscoveryModule:_setIcon(brainrotId: string)
+function PurchasedModule:_setIcon(weaponKey: string)
 	if not self._iconHolder then return end
 
-	-- Clear any previously cloned icon (anything that isn't the Shine)
+	-- Clear any previously cloned icon (preserve Shine + constraints)
 	for _, child in ipairs((self._iconHolder :: Frame):GetChildren()) do
-		if child.Name ~= "Shine" and not child:IsA("UIConstraint") and not child:IsA("UIAspectRatioConstraint") then
+		if child.Name ~= "Shine"
+			and not child:IsA("UIConstraint")
+			and not child:IsA("UIAspectRatioConstraint") then
 			child:Destroy()
 		end
 	end
 
-	if not self._brainrotsFolder then return end
+	if not self._weaponsFolder then return end
 
-	-- Each brainrot is a Folder: { Body [Model], Icon [ImageLabel] }
-	local brainrotFolder = self._brainrotsFolder:FindFirstChild(brainrotId)
-	if not brainrotFolder then
-		-- Fallback to Default
-		brainrotFolder = self._brainrotsFolder:FindFirstChild("Default")
-	end
-	if not brainrotFolder then return end
+	local weaponFolder = self._weaponsFolder:FindFirstChild(weaponKey)
+	if not weaponFolder then return end
 
-	local iconTemplate = brainrotFolder:FindFirstChild("Icon")
+	local iconTemplate = weaponFolder:FindFirstChild("Icon")
 	if not iconTemplate then return end
 
 	local iconClone = iconTemplate:Clone()
-	iconClone.Name = "BrainrotIcon"
+	iconClone.Name = "WeaponIcon"
 
 	-- Fill the holder
 	if iconClone:IsA("GuiObject") then
@@ -257,7 +294,7 @@ end
 
 -- ── Shine Spin ───────────────────────────────────────────────────────────────
 
-function DiscoveryModule:_startShine()
+function PurchasedModule:_startShine()
 	self:_stopShine()
 
 	local shine = self._iconHolderShine
@@ -270,7 +307,7 @@ function DiscoveryModule:_startShine()
 	self._spinTween:Play()
 end
 
-function DiscoveryModule:_stopShine()
+function PurchasedModule:_stopShine()
 	if self._spinTween then
 		self._spinTween:Cancel()
 		self._spinTween = nil
@@ -279,10 +316,10 @@ end
 
 -- ── Cleanup ──────────────────────────────────────────────────────────────────
 
-function DiscoveryModule:Destroy()
+function PurchasedModule:Destroy()
 	self:_cancelTimers()
 	self:_stopShine()
 	if self._janitor then self._janitor:Cleanup(); self._janitor = nil end
 end
 
-return DiscoveryModule
+return PurchasedModule
