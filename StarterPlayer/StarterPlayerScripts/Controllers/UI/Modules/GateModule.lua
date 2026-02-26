@@ -23,6 +23,7 @@
 --     UIScale [UIScale]          ← frame pop animation
 --     UIAspectRatioConstraint
 
+local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local SoundService     = game:GetService("SoundService")
 local TweenService     = game:GetService("TweenService")
@@ -125,9 +126,13 @@ function GateModule:Init(ctx: any)
 		end))
 	end
 
-	-- Wire Close (X) button (sound handled by ButtonFX, so no extra sound here)
+	-- Wire Close (X) button — mark gate as dismissed so it won't re-prompt
+	-- until the player leaves range or touches the gate's core part
 	if self._closeBtn then
 		self._janitor:Add((self._closeBtn :: GuiButton).MouseButton1Click:Connect(function()
+			if self._activeGate then
+				self._activeGate.dismissed = true
+			end
 			self:_hide(false)
 		end))
 	end
@@ -224,17 +229,32 @@ function GateModule:_registerGate(gate: Instance)
 	end
 
 	local gateData = {
-		model   = gate,
-		order   = order,
-		price   = price,
-		stageId = stageId,
-		part    = part,
-		unlocked = false,
+		model     = gate,
+		order     = order,
+		price     = price,
+		stageId   = stageId,
+		part      = part,
+		unlocked  = false,
+		dismissed = false,  -- true when player manually closed the popup
+		inRange   = false,  -- true when player is within RANGE studs
 	}
 	table.insert(self._gates, gateData)
 
 	-- Update SurfaceGui price on the gate model immediately
 	self:_updateGateSurfacePrice(gateData)
+
+	-- Touch on gate core part clears dismissed flag and re-prompts
+	if part then
+		self._janitor:Add((part :: BasePart).Touched:Connect(function(hit)
+			if gateData.unlocked then return end
+			if not gateData.dismissed then return end
+			local char = hit and hit.Parent
+			local plr = char and Players:GetPlayerFromCharacter(char)
+			if plr ~= self._ctx.Player then return end
+			gateData.dismissed = false
+			self:_proximityCheck()
+		end))
+	end
 
 	print(("[GateModule] Registered gate: %s | StageId=%s | Price=%s"):format(
 		gate.Name, tostring(stageId), tostring(price)))
@@ -278,21 +298,30 @@ function GateModule:_proximityCheck()
 
 	local playerPos = (hrp :: BasePart).Position
 
-	-- Find nearest locked gate within range
+	-- Find nearest locked gate within range, and update per-gate inRange state
 	local nearestGate = nil
 	local nearestDist = RANGE + 1
 
 	for _, gateData in ipairs(self._gates) do
 		if not gateData.unlocked and gateData.part and gateData.part.Parent then
 			local dist = (gateData.part.Position - playerPos).Magnitude
-			if dist <= RANGE and dist < nearestDist then
+			local wasInRange = gateData.inRange
+			gateData.inRange = dist <= RANGE
+
+			-- Clear dismissed when player leaves range (so re-entering will prompt)
+			if wasInRange and not gateData.inRange then
+				gateData.dismissed = false
+			end
+
+			if gateData.inRange and dist < nearestDist then
 				nearestDist = dist
 				nearestGate = gateData
 			end
 		end
 	end
 
-	if nearestGate then
+	-- Only show popup if nearest gate is not dismissed
+	if nearestGate and not nearestGate.dismissed then
 		if not self._open then
 			self:_show(nearestGate)
 		elseif self._activeGate ~= nearestGate then
@@ -302,7 +331,7 @@ function GateModule:_proximityCheck()
 		end
 	else
 		if self._open then
-			-- Walked out of range — play click sound on close
+			-- Walked out of range or gate is dismissed — close popup
 			self:_hide(true)
 		end
 	end
