@@ -23,11 +23,12 @@
 --     UIScale [UIScale]          ← frame pop animation
 --     UIAspectRatioConstraint
 
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
-local SoundService     = game:GetService("SoundService")
-local TweenService     = game:GetService("TweenService")
-local Workspace        = game:GetService("Workspace")
+local Players              = game:GetService("Players")
+local RunService           = game:GetService("RunService")
+local SoundService         = game:GetService("SoundService")
+local TweenService         = game:GetService("TweenService")
+local ContextActionService = game:GetService("ContextActionService")
+local Workspace            = game:GetService("Workspace")
 
 local GateModule = {}
 GateModule.__index = GateModule
@@ -40,6 +41,7 @@ local ICON_POP_DURATION   = 0.525  -- seconds for lockicon scale 0→1
 local ICON_ROCK_DURATION  = 1.5    -- seconds per rock cycle (±degrees)
 local ICON_ROCK_DEGREES   = 5      -- rotation amplitude
 local FADE_DURATION       = 0.8    -- seconds for gate model fade-out
+local INTERACT_ACTION     = "GateInteract" -- ContextActionService action name
 
 -- ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -382,6 +384,13 @@ function GateModule:_show(gateData: any)
 
 	-- Start lockicon animation (pop + rock)
 	self:_startLockIconAnim()
+
+	-- Bind 'E' key to purchase gate
+	ContextActionService:BindAction(INTERACT_ACTION, function(_, inputState)
+		if inputState == Enum.UserInputState.Begin then
+			self:_onBuy()
+		end
+	end, false, Enum.KeyCode.E)
 end
 
 function GateModule:_hide(playSound: boolean?)
@@ -389,6 +398,9 @@ function GateModule:_hide(playSound: boolean?)
 	if not self._open then return end
 	self._open = false
 	self._activeGate = nil
+
+	-- Unbind 'E' key
+	ContextActionService:UnbindAction(INTERACT_ACTION)
 
 	-- Play button click sound (same as ButtonFX) when dismissing
 	if playSound then

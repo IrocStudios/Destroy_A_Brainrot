@@ -106,6 +106,21 @@ function StateController:ApplyDelta(deltaList)
 		elseif key == "Deaths" then
 			self.State.Stats = self.State.Stats or {}
 			self.State.Stats.Deaths = d.v
+		elseif key == "Armor" then
+			self.State.Defense = self.State.Defense or {}
+			self.State.Defense.Armor = d.v
+		elseif key == "MaxArmor" then
+			self.State.Defense = self.State.Defense or {}
+			self.State.Defense.MaxArmor = d.v
+		elseif key == "ArmorTier" then
+			self.State.Defense = self.State.Defense or {}
+			self.State.Defense.ArmorTier = d.v
+		elseif key == "SpeedBoost" then
+			self.State.Progression = self.State.Progression or {}
+			self.State.Progression.SpeedBoost = d.v
+		elseif key == "SpeedTier" then
+			self.State.Progression = self.State.Progression or {}
+			self.State.Progression.SpeedTier = d.v
 		end
 	end
 	self.Changed:Fire(self.State, deltaList)

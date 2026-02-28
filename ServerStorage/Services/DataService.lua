@@ -166,7 +166,7 @@ end
 --////////////////////////////
 -- Profile schema
 --////////////////////////////
-local CURRENT_VERSION = 1
+local CURRENT_VERSION = 3
 
 local function MakeProfileTemplate()
 	return {
@@ -184,6 +184,7 @@ local function MakeProfileTemplate()
 			Level = getStartingLevel(),
 			StageUnlocked = getStartingStage(),
 			Rebirths = 0,
+			SpeedTier = 0, -- highest purchased speed upgrade tier (0 = none)
 		},
 
 		Inventory = {
@@ -234,6 +235,12 @@ local function MakeProfileTemplate()
 			Sensitivity = 1,
 		},
 
+		Defense = {
+			Armor = 0,     -- current armor points
+			MaxArmor = 0,  -- max armor capacity (upgrades increase this)
+			ArmorTier = 0, -- highest purchased armor upgrade tier (0 = none)
+		},
+
 		Stats = {
 			TotalKills = 0,
 			TotalCashEarned = 0,
@@ -261,6 +268,23 @@ local function ApplyMigrations(data: any)
 			end
 			if data.Rewards and data.Rewards.Gifts == nil then
 				data.Rewards.Gifts = { NextIndex = 1, Claimed = {}, LastClaim = 0 }
+			end
+		end
+
+		if nextV == 2 then
+			if not data.Defense then
+				data.Defense = { Armor = 0, MaxArmor = 0 }
+			end
+		end
+
+		if nextV == 3 then
+			if data.Progression and data.Progression.SpeedTier == nil then
+				data.Progression.SpeedTier = 0
+			end
+			if data.Defense then
+				if data.Defense.ArmorTier == nil then
+					data.Defense.ArmorTier = 0
+				end
 			end
 		end
 

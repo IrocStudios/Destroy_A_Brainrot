@@ -17,6 +17,11 @@ local SpringService = require(
 	ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("SpringService")
 )
 
+-- StateController singleton for reading SpeedBoost from server state
+local StateController = require(
+	ReplicatedStorage:WaitForChild("Client"):WaitForChild("Controllers"):WaitForChild("StateController")
+)
+
 -- ── Constants ────────────────────────────────────────────────────────────────
 local BASE_WALK_SPEED   = 16
 local SPRINT_BONUS      = 8
@@ -33,7 +38,7 @@ local controlModule: any = nil
 
 local sprintKeyHeld      = false
 local isADS              = false
-local speedBoost         = 0   -- from speed shop purchases (future)
+local speedBoost         = 0   -- from speed shop purchases (synced via StateController)
 local gamepadMoveMag     = 0   -- magnitude of gamepad left stick
 
 -- ── Input ────────────────────────────────────────────────────────────────────
@@ -144,6 +149,25 @@ local function onCharacterRemoving()
 	isADS = false
 	gamepadMoveMag = 0
 end
+
+-- ── State sync: read SpeedBoost from server ─────────────────────────────────
+
+local function readSpeedBoostFromState()
+	local s = StateController.State
+	local prog = s and s.Progression
+	local v = prog and prog.SpeedBoost
+	if typeof(v) == "number" then
+		speedBoost = v
+	end
+end
+
+-- Apply initial value (may already be populated if snapshot arrived)
+readSpeedBoostFromState()
+
+-- Listen for future deltas
+StateController.Changed:Connect(function(_state, _deltas)
+	readSpeedBoostFromState()
+end)
 
 -- ── Boot ─────────────────────────────────────────────────────────────────────
 
