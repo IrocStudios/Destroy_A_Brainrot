@@ -64,12 +64,11 @@ NetIds.Encode = {
 
 	-- Defense / Armor
 	Armor = 70,
-	MaxArmor = 71,
-	ArmorTier = 72,
+	ArmorStep = 72,
 
 	-- Speed / Upgrades
 	SpeedBoost = 80,
-	SpeedTier = 81,
+	SpeedStep = 81,
 }
 
 NetIds.Decode = {}

@@ -166,7 +166,7 @@ end
 --////////////////////////////
 -- Profile schema
 --////////////////////////////
-local CURRENT_VERSION = 3
+local CURRENT_VERSION = 6
 
 local function MakeProfileTemplate()
 	return {
@@ -184,7 +184,7 @@ local function MakeProfileTemplate()
 			Level = getStartingLevel(),
 			StageUnlocked = getStartingStage(),
 			Rebirths = 0,
-			SpeedTier = 0, -- highest purchased speed upgrade tier (0 = none)
+			SpeedStep = 0, -- number of speed purchases made (0 = none)
 		},
 
 		Inventory = {
@@ -211,6 +211,14 @@ local function MakeProfileTemplate()
 			},
 
 			GiftCooldowns = {},
+
+			-- RNG gift system: inventory of unopened gifts
+			GiftInventory = {}, -- array of { id, rarity, source, receivedAt }
+			NextGiftId = 1,     -- auto-increment counter for gift IDs
+
+			-- Pity tracking: per loot source, { misses = number }
+			-- Keys: "Gift_Common", "Gift_Rare", "Egg_Dragon", etc.
+			Pity = {},
 		},
 
 		Boosts = {
@@ -236,9 +244,8 @@ local function MakeProfileTemplate()
 		},
 
 		Defense = {
-			Armor = 0,     -- current armor points
-			MaxArmor = 0,  -- max armor capacity (upgrades increase this)
-			ArmorTier = 0, -- highest purchased armor upgrade tier (0 = none)
+			Armor = 0,      -- current armor points (chargeable, no max)
+			ArmorStep = 0,  -- number of armor purchases made (0 = none)
 		},
 
 		Stats = {
@@ -284,6 +291,45 @@ local function ApplyMigrations(data: any)
 			if data.Defense then
 				if data.Defense.ArmorTier == nil then
 					data.Defense.ArmorTier = 0
+				end
+			end
+		end
+
+		if nextV == 4 then
+			-- Armor rework: tiered MaxArmor → single chargeable number.
+			-- ArmorTier → ArmorStep (rename), MaxArmor removed.
+			if data.Defense then
+				if data.Defense.ArmorStep == nil then
+					-- Carry over old ArmorTier as starting step count
+					data.Defense.ArmorStep = data.Defense.ArmorTier or 0
+				end
+				data.Defense.ArmorTier = nil
+				data.Defense.MaxArmor  = nil
+			end
+		end
+
+		if nextV == 5 then
+			-- Speed rework: tiered SpeedTier → step-based SpeedStep.
+			-- Old tiers (1-5) are incompatible with new 104-step system; reset to 0.
+			if data.Progression then
+				if data.Progression.SpeedStep == nil then
+					data.Progression.SpeedStep = 0
+				end
+				data.Progression.SpeedTier = nil
+			end
+		end
+
+		if nextV == 6 then
+			-- RNG gift system: add GiftInventory, NextGiftId, Pity tables
+			if type(data.Rewards) == "table" then
+				if data.Rewards.GiftInventory == nil then
+					data.Rewards.GiftInventory = {}
+				end
+				if data.Rewards.NextGiftId == nil then
+					data.Rewards.NextGiftId = 1
+				end
+				if data.Rewards.Pity == nil then
+					data.Rewards.Pity = {}
 				end
 			end
 		end

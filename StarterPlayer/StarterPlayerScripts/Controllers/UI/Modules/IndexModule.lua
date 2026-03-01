@@ -19,7 +19,7 @@ local IndexModule = {}
 IndexModule.__index = IndexModule
 
 -- ── Rarity gradient helper ──────────────────────────────────────────────────
-local _rarityConfigInst = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("RarityConfig")
+local _rarityGradients = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("RarityGradients")
 
 local TEXTLABEL_DARKEN = 0.85 -- 15% darker on TextLabels
 
@@ -40,7 +40,7 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 	for _, desc in parent:GetDescendants() do
 		if desc:IsA("UIGradient") then
 			if desc.Name == "RarityGradient" then
-				local source = _rarityConfigInst:FindFirstChild(rarityName)
+				local source = _rarityGradients:FindFirstChild(rarityName)
 				if source and source:IsA("UIGradient") then
 					local color = source.Color
 					if desc.Parent and desc.Parent:IsA("TextLabel") then
@@ -54,7 +54,7 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 					CollectionService:RemoveTag(desc, "RainbowGradient")
 				end
 			elseif desc.Name == "RarityGradientStroke" then
-				local source = _rarityConfigInst:FindFirstChild(rarityName .. "Stroke")
+				local source = _rarityGradients:FindFirstChild(rarityName .. "Stroke")
 				if source and source:IsA("UIGradient") then
 					desc.Color = source.Color
 				end

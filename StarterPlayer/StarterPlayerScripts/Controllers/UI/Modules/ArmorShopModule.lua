@@ -1,30 +1,26 @@
 --!strict
 -- ArmorShopModule.lua  |  Frame: ArmorShop
--- Shop for armor (MaxArmor) upgrade purchases. Sequential tiers — must buy in order.
+-- Frame-based armor shop. Shows the next several upgrade steps using
+-- the formula-based ArmorConfig (infinite scaling, no fixed tiers).
 --
 -- WIRE-UP NOTES:
 --   Frame "ArmorShop"
 --     ├─ ItemList    (ScrollingFrame)
 --     │    └─ ArmorCard (Template, Visible=false)
---     │         ├─ TierName   (TextLabel e.g. "Light Plating")
---     │         ├─ ArmorValue (TextLabel e.g. "+10 Armor")
+--     │         ├─ TierName   (TextLabel e.g. "Step 3")
+--     │         ├─ ArmorValue (TextLabel e.g. "+25 Armor")
 --     │         ├─ PriceLabel (TextLabel)
 --     │         └─ BuyButton  (TextButton)
---     ├─ CurrentArmor (TextLabel – shows current/max armor)
+--     ├─ CurrentArmor (TextLabel – shows current armor)
 --     ├─ CashLabel    (TextLabel)
 --     └─ XButton  (TextButton)
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ArmorShopModule = {}
 ArmorShopModule.__index = ArmorShopModule
 
--- Inline fallback tier definitions until ArmorConfig exists
-local DEFAULT_TIERS = {
-	{ Name = "Light Plating",    ArmorBonus = 10,  Price = 750   },
-	{ Name = "Steel Jacket",     ArmorBonus = 25,  Price = 2500  },
-	{ Name = "Reinforced Suit",  ArmorBonus = 50,  Price = 7500  },
-	{ Name = "Titan Armor",      ArmorBonus = 100, Price = 20000 },
-	{ Name = "Fortress Shell",   ArmorBonus = 200, Price = 50000 },
-}
+local PREVIEW_COUNT = 5 -- how many upcoming steps to show
 
 local function find(parent: Instance, name: string): Instance?
 	return parent:FindFirstChild(name, true)
@@ -43,25 +39,40 @@ local function getCash(ctx: any): number
 	return (s.Currency and s.Currency.Cash) or 0
 end
 
-local function getArmorTier(ctx: any): number
+local function getArmorStep(ctx: any): number
 	local s = (ctx.State and ctx.State.State) or {}
-	return (s.Defense and s.Defense.ArmorTier) or 0
+	return (s.Defense and s.Defense.ArmorStep) or 0
 end
 
-local function getArmorValues(ctx: any): (number, number)
+local function getCurrentArmor(ctx: any): number
 	local s = (ctx.State and ctx.State.State) or {}
-	local def = s.Defense or {}
-	return (def.Armor or 0), (def.MaxArmor or 0)
+	return (s.Defense and tonumber(s.Defense.Armor)) or 0
 end
 
-function ArmorShopModule:_getTiers(): { any }
-	local cfg = self._ctx.Config.ArmorConfig
-	return (cfg and cfg.Tiers) or DEFAULT_TIERS
+-- Load ArmorConfig for formula
+local _armorConfig: any = nil
+local function getArmorConfig(): any
+	if _armorConfig then return _armorConfig end
+	local ok, cfg = pcall(function()
+		local shared = ReplicatedStorage:WaitForChild("Shared", 5)
+		local cfgFolder = shared and shared:WaitForChild("Config", 5)
+		return cfgFolder and require(cfgFolder:WaitForChild("ArmorConfig", 5))
+	end)
+	if ok and cfg then _armorConfig = cfg end
+	return _armorConfig
 end
 
-function ArmorShopModule:_buildCard(template: Frame, tier: any, index: number)
+local function getStepValues(step: number): (number, number)
+	local cfg = getArmorConfig()
+	if cfg and cfg.GetStep then return cfg.GetStep(step) end
+	return 10, 500
+end
+
+function ArmorShopModule:_buildCard(template: Frame, stepIndex: number)
+	local amount, price = getStepValues(stepIndex)
+
 	local card = template:Clone()
-	card.Name    = "Tier_" .. tostring(index)
+	card.Name    = "Step_" .. tostring(stepIndex)
 	card.Visible = true
 
 	local nameLbl  = find(card, "TierName")   :: TextLabel?
@@ -69,19 +80,20 @@ function ArmorShopModule:_buildCard(template: Frame, tier: any, index: number)
 	local priceLbl = find(card, "PriceLabel")  :: TextLabel?
 	local buyBtn   = find(card, "BuyButton")   :: TextButton?
 
-	if nameLbl  then nameLbl.Text  = tier.Name or ("Tier " .. tostring(index)) end
-	if armorLbl then armorLbl.Text = "+" .. tostring(tier.ArmorBonus) .. " Armor" end
-	if priceLbl then priceLbl.Text = "$" .. fmt(tier.Price or 0) end
+	if nameLbl  then nameLbl.Text  = "Step " .. tostring(stepIndex + 1) end
+	if armorLbl then armorLbl.Text = "+" .. tostring(amount) .. " Armor" end
+	if priceLbl then priceLbl.Text = "$" .. fmt(price) end
 
-	self._cards[index] = {
+	self._cards[stepIndex] = {
 		card   = card,
-		tier   = tier,
+		amount = amount,
+		price  = price,
 		buyBtn = buyBtn,
 	}
 
 	if buyBtn then
 		self._janitor:Add(buyBtn.MouseButton1Click:Connect(function()
-			self:_onPurchase(index, tier)
+			self:_onPurchase(stepIndex)
 		end))
 	end
 
@@ -93,10 +105,14 @@ function ArmorShopModule:_populate()
 	local template = itemList and find(itemList, "ArmorCard")
 	if not (itemList and template) then return end
 
+	-- Clear old cards
 	for k, rec in pairs(self._cards) do rec.card:Destroy(); self._cards[k] = nil end
 
-	for i, tier in ipairs(self:_getTiers()) do
-		local card = self:_buildCard(template :: Frame, tier, i)
+	-- Build cards for the next PREVIEW_COUNT steps
+	local currentStep = getArmorStep(self._ctx)
+	for i = 0, PREVIEW_COUNT - 1 do
+		local stepIdx = currentStep + i
+		local card = self:_buildCard(template :: Frame, stepIdx)
 		if card then card.Parent = itemList end
 	end
 
@@ -104,20 +120,20 @@ function ArmorShopModule:_populate()
 end
 
 function ArmorShopModule:_refreshCards()
-	local cash      = getCash(self._ctx)
-	local ownedTier = getArmorTier(self._ctx)
+	local cash        = getCash(self._ctx)
+	local currentStep = getArmorStep(self._ctx)
 
-	for idx, rec in pairs(self._cards) do
+	for stepIdx, rec in pairs(self._cards) do
 		local btn = rec.buyBtn
 		if not btn then continue end
-		local price = rec.tier.Price or 0
 
-		if idx <= ownedTier then
-			-- Already purchased
+		if stepIdx < currentStep then
+			-- Already purchased (shouldn't normally appear, but handle it)
 			btn.Text   = "Owned"
 			btn.Active = false
-		elseif idx == ownedTier + 1 then
-			-- Next available tier
+		elseif stepIdx == currentStep then
+			-- Next purchasable step
+			local _, price = getStepValues(stepIdx)
 			if cash >= price then
 				btn.Text   = "Buy"
 				btn.Active = true
@@ -126,16 +142,16 @@ function ArmorShopModule:_refreshCards()
 				btn.Active = false
 			end
 		else
-			-- Locked — need previous tier first
+			-- Future steps — locked until previous purchased
 			btn.Text   = "Locked"
 			btn.Active = false
 		end
 	end
 end
 
-function ArmorShopModule:_onPurchase(index: number, tier: any)
+function ArmorShopModule:_onPurchase(stepIndex: number)
 	local ctx = self._ctx
-	local rec = self._cards[index]
+	local rec = self._cards[stepIndex]
 
 	if rec and rec.buyBtn and not rec.buyBtn.Active then
 		ctx.UI.Effects.Shake(rec.buyBtn, 5, 0.25, 0.1)
@@ -145,10 +161,12 @@ function ArmorShopModule:_onPurchase(index: number, tier: any)
 	task.spawn(function()
 		local rf = ctx.Net:GetFunction("ShopAction")
 		local ok, result = pcall(function()
-			return rf:InvokeServer({ action = "buyArmor", tierIndex = index })
+			return rf:InvokeServer({ action = "buyArmor" })
 		end)
 		if ok and type(result) == "table" and result.ok then
 			ctx.UI.Sound:Play("cartoon_pop")
+			-- Re-populate to shift the step window forward
+			self:_populate()
 		else
 			if rec and rec.buyBtn then ctx.UI.Effects.Shake(rec.buyBtn, 6, 0.3, 0.12) end
 		end
@@ -156,14 +174,10 @@ function ArmorShopModule:_onPurchase(index: number, tier: any)
 end
 
 function ArmorShopModule:_refreshArmorLabel()
-	local armor, maxArmor = getArmorValues(self._ctx)
+	local armor = getCurrentArmor(self._ctx)
 	local lbl = find(self._frame, "CurrentArmor") :: TextLabel?
 	if lbl then
-		if maxArmor > 0 then
-			lbl.Text = "Armor: " .. tostring(math.floor(armor)) .. "/" .. tostring(math.floor(maxArmor))
-		else
-			lbl.Text = "Armor: None"
-		end
+		lbl.Text = "Armor: " .. tostring(math.floor(armor))
 	end
 	local cashLbl = find(self._frame, "CashLabel") :: TextLabel?
 	if cashLbl then cashLbl.Text = "$" .. fmt(getCash(self._ctx)) end

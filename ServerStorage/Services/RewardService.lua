@@ -1,6 +1,8 @@
 local RewardService = {}
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
 
 local DAY_SECONDS = 24 * 60 * 60
 
@@ -43,6 +45,16 @@ local function getRewardsTableFromProfile(profile)
 	return nil
 end
 
+----------------------------------------------------------------------
+-- Shared module references (set in Init)
+----------------------------------------------------------------------
+local LootTable = nil
+local GiftConfig = nil
+local RewardGranter = nil
+
+----------------------------------------------------------------------
+-- Init
+----------------------------------------------------------------------
 function RewardService:Init(services)
 	self.Services = services
 	self.DataService = services.DataService
@@ -52,6 +64,15 @@ function RewardService:Init(services)
 	self.ProgressionService = services.ProgressionService
 	self.RarityService = services.RarityService
 	self.CombatService = services.CombatService
+
+	-- Require shared modules
+	local SharedUtil = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Util")
+	local SharedConfig = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config")
+
+	LootTable = require(SharedUtil:WaitForChild("LootTable"))
+	GiftConfig = require(SharedConfig:WaitForChild("GiftConfig"))
+	RewardGranter = require(ServerStorage:WaitForChild("Services"):WaitForChild("RewardGranter"))
+	RewardGranter.Setup(services)
 
 	self.DailyRewards = {
 		{ cash = 150, xp = 10 },
@@ -63,6 +84,7 @@ function RewardService:Init(services)
 		{ cash = 1800, xp = 75 },
 	}
 
+	-- Legacy kill gift cooldown system (still used by OnBrainrotKilled)
 	self.Gifts = {
 		KillGift = {
 			cooldown = 60 * 10,
@@ -79,29 +101,12 @@ function RewardService:Init(services)
 	self.KillGiftDropChanceMax = 0.25
 end
 
+----------------------------------------------------------------------
+-- Start
+----------------------------------------------------------------------
 function RewardService:Start()
-	local shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
-	local net = shared:WaitForChild("Net")
-	local remotes = net:WaitForChild("Remotes")
-	local rf = remotes:WaitForChild("RemoteFunctions")
-	local rewardRF = rf:WaitForChild("RewardAction")
-
-	rewardRF.OnServerInvoke = function(player, payload)
-		if type(payload) ~= "table" then
-			return { ok = false, error = "BadPayload" }
-		end
-
-		local action = payload.Action
-		if action == "ClaimDaily" then
-			return self:ClaimDaily(player)
-		elseif action == "ClaimGift" then
-			return self:ClaimGift(player, payload.GiftId)
-		elseif action == "GetStatus" then
-			return self:GetStatus(player)
-		else
-			return { ok = false, error = "UnknownAction" }
-		end
-	end
+	-- NOTE: RewardAction OnServerInvoke is handled by NetService → HandleRewardAction.
+	-- We no longer bind it directly here.
 
 	if self.CombatService then
 		local sig = rawget(self.CombatService, "BrainrotKilled")
@@ -127,11 +132,40 @@ function RewardService:Start()
 	end)
 end
 
+----------------------------------------------------------------------
+-- HandleRewardAction: entry point called by NetService:RouteAction
+----------------------------------------------------------------------
+function RewardService:HandleRewardAction(player, payload)
+	if type(payload) ~= "table" then
+		return { ok = false, error = "BadPayload" }
+	end
+
+	local action = payload.Action
+	if action == "ClaimDaily" then
+		return self:ClaimDaily(player)
+	elseif action == "ClaimGift" then
+		return self:ClaimGift(player, payload.GiftId)
+	elseif action == "GetStatus" then
+		return self:GetStatus(player)
+	elseif action == "OpenGift" then
+		return self:OpenGift(player, payload.GiftId)
+	elseif action == "KeepGift" then
+		return self:KeepGift(player, payload.GiftId)
+	elseif action == "GetInventory" then
+		return self:GetGiftInventory(player)
+	else
+		return { ok = false, error = "UnknownAction" }
+	end
+end
+
+----------------------------------------------------------------------
+-- Notify helper
+----------------------------------------------------------------------
 function RewardService:Notify(player, title, body)
-	local payload = { Title = title, Body = body }
+	local p = { Title = title, Body = body }
 
 	if self.NetService and type(self.NetService.Notify) == "function" then
-		self.NetService:Notify(player, payload)
+		self.NetService:Notify(player, p)
 		return
 	end
 
@@ -139,15 +173,36 @@ function RewardService:Notify(player, title, body)
 	local e = rs:WaitForChild("Shared"):WaitForChild("Net"):WaitForChild("Remotes"):WaitForChild("RemoteEvents")
 	local notifyRE = e:FindFirstChild("Notify")
 	if notifyRE then
-		notifyRE:FireClient(player, payload)
+		notifyRE:FireClient(player, p)
 	end
 end
 
+----------------------------------------------------------------------
+-- NotifyEvent: fire a typed event to the client (for gift received prompt)
+----------------------------------------------------------------------
+function RewardService:NotifyEvent(player, eventType, data)
+	local p = { Type = eventType, Data = data }
+
+	local rs = game:GetService("ReplicatedStorage")
+	local ok, re = pcall(function()
+		return rs:WaitForChild("Shared"):WaitForChild("Net"):WaitForChild("Remotes"):WaitForChild("RemoteEvents"):FindFirstChild("Notify")
+	end)
+	if ok and re then
+		re:FireClient(player, p)
+	end
+end
+
+----------------------------------------------------------------------
+-- GetProfile
+----------------------------------------------------------------------
 function RewardService:GetProfile(player)
 	if not self.DataService then return nil end
 	return self.DataService:GetProfile(player)
 end
 
+----------------------------------------------------------------------
+-- GetStatus (existing)
+----------------------------------------------------------------------
 function RewardService:GetStatus(player)
 	local profile = self:GetProfile(player)
 	if not profile then
@@ -180,6 +235,12 @@ function RewardService:GetStatus(player)
 		}
 	end
 
+	-- Include gift inventory count
+	local invCount = 0
+	if type(r.GiftInventory) == "table" then
+		invCount = #r.GiftInventory
+	end
+
 	return {
 		ok = true,
 		Daily = {
@@ -188,6 +249,7 @@ function RewardService:GetStatus(player)
 			lastClaim = lastClaim,
 		},
 		Gifts = gifts,
+		GiftInventoryCount = invCount,
 		ServerTime = t,
 	}
 end
@@ -196,6 +258,9 @@ function RewardService:FlushStatus(player)
 	self:GetStatus(player)
 end
 
+----------------------------------------------------------------------
+-- ClaimDaily (existing)
+----------------------------------------------------------------------
 function RewardService:ClaimDaily(player)
 	local profile = self:GetProfile(player)
 	if not profile then
@@ -267,6 +332,9 @@ function RewardService:ClaimDaily(player)
 	}
 end
 
+----------------------------------------------------------------------
+-- pickWeighted (legacy, used by ClaimGift for kill gifts)
+----------------------------------------------------------------------
 function RewardService:pickWeighted(list)
 	local total = 0
 	for _, item in ipairs(list) do
@@ -286,23 +354,28 @@ function RewardService:pickWeighted(list)
 	return list[#list]
 end
 
+----------------------------------------------------------------------
+-- GrantReward (updated to use RewardGranter for universal kinds)
+----------------------------------------------------------------------
 function RewardService:GrantReward(player, reward)
 	if type(reward) ~= "table" then return end
-	if reward.kind == "Cash" then
-		if self.EconomyService then
-			self.EconomyService:AddCash(player, tonumber(reward.amount) or 0, "Gift")
-		end
-	elseif reward.kind == "XP" then
-		if self.ProgressionService then
-			self.ProgressionService:AddXP(player, tonumber(reward.amount) or 0, "Gift")
-		end
-	elseif reward.kind == "Tool" then
+
+	-- Legacy kill gift rewards use "w" instead of "weight" and "Tool" kind
+	-- Route them through the old path for compatibility
+	if reward.kind == "Tool" then
 		if self.InventoryService and type(reward.toolName) == "string" then
 			self.InventoryService:GrantTool(player, reward.toolName)
 		end
+		return
 	end
+
+	-- All other kinds go through the universal granter
+	RewardGranter.Grant(player, reward)
 end
 
+----------------------------------------------------------------------
+-- ClaimGift (existing kill gift cooldown system)
+----------------------------------------------------------------------
 function RewardService:ClaimGift(player, giftId)
 	if type(giftId) ~= "string" then
 		return { ok = false, error = "BadGiftId" }
@@ -362,12 +435,17 @@ function RewardService:ClaimGift(player, giftId)
 	}
 end
 
+----------------------------------------------------------------------
+-- OnBrainrotKilled: existing kill gift drop + NEW rarity gift to inventory
+----------------------------------------------------------------------
 function RewardService:OnBrainrotKilled(player, brainrotInfo)
 	if not player or not player.Parent then return end
 
 	local rarityName = nil
+	local rarityNum = 1
 	if type(brainrotInfo) == "table" then
 		rarityName = brainrotInfo.rarity or brainrotInfo.Rarity
+		rarityNum = tonumber(brainrotInfo.rarityNum or brainrotInfo.RarityNum) or 1
 	end
 
 	local chance = self.KillGiftDropChanceBase
@@ -383,27 +461,247 @@ function RewardService:OnBrainrotKilled(player, brainrotInfo)
 		return
 	end
 
-	local giftId = "KillGift"
-	local def = self.Gifts[giftId]
-	if not def then return end
+	-- Determine gift rarity from killed brainrot's rarity
+	-- Map name to number if needed
+	if rarityNum <= 1 and rarityName then
+		local RarityToNum = {
+			Common = 1, Uncommon = 2, Rare = 3, Epic = 4,
+			Legendary = 5, Mythic = 6, Transcendent = 7,
+		}
+		rarityNum = RarityToNum[rarityName] or 1
+	end
+
+	-- Add gift directly to inventory (enemy drops skip the prompt)
+	self:ReceiveGift(player, rarityNum, "kill", true)
+end
+
+----------------------------------------------------------------------
+-- ReceiveGift: add a gift to the player's inventory
+-- skipPrompt = true for enemy drops (silent → inventory only)
+-- skipPrompt = false for daily/friend gifts (fires prompt notification)
+----------------------------------------------------------------------
+function RewardService:ReceiveGift(player, rarity, source, skipPrompt)
+	rarity = tonumber(rarity) or 1
+	rarity = clamp(rarity, 1, 7)
+	source = tostring(source or "unknown")
+
+	local t = now()
+	local giftObj = nil
 
 	pcall(function()
 		self.DataService:Update(player, function(data)
 			data.Rewards = data.Rewards or {}
-			data.Rewards.GiftCooldowns = data.Rewards.GiftCooldowns or {}
-			local giftCooldowns = data.Rewards.GiftCooldowns
+			data.Rewards.GiftInventory = data.Rewards.GiftInventory or {}
+			data.Rewards.NextGiftId = data.Rewards.NextGiftId or 1
 
-			local entry = getOrInitGiftEntry(giftCooldowns, giftId)
-			local maxPending = tonumber(def.maxPending) or 5
-			entry.pending = clamp(entry.pending + 1, 0, maxPending)
-			if type(entry.next) ~= "number" then entry.next = 0 end
-			if entry.next < 0 then entry.next = 0 end
+			local id = "gift_" .. tostring(data.Rewards.NextGiftId)
+			data.Rewards.NextGiftId = data.Rewards.NextGiftId + 1
 
+			giftObj = {
+				id = id,
+				rarity = rarity,
+				source = source,
+				receivedAt = t,
+			}
+			table.insert(data.Rewards.GiftInventory, giftObj)
 			return true
 		end)
 	end)
 
-	self:Notify(player, "Gift Drop!", "A gift was added. Claim it in the Gifts menu.")
+	if not giftObj then return nil end
+
+	-- Sync inventory to client
+	if self.NetService then
+		local profile = self:GetProfile(player)
+		local inv = profile and profile.Rewards and profile.Rewards.GiftInventory or {}
+		self.NetService:QueueDelta(player, "GiftInventory", inv)
+		self.NetService:FlushDelta(player)
+	end
+
+	if not skipPrompt then
+		-- Fire notification so client shows Open/Keep prompt
+		local displayName = GiftConfig.GetDisplayName(rarity)
+		self:NotifyEvent(player, "giftReceived", {
+			giftId = giftObj.id,
+			rarity = rarity,
+			source = source,
+			displayName = displayName,
+		})
+	else
+		-- Silent add — just notify they got a gift drop
+		self:Notify(player, "Gift Drop!", "A gift was added to your inventory.")
+	end
+
+	return giftObj
+end
+
+----------------------------------------------------------------------
+-- OpenGift: consume a gift from inventory, roll loot, grant reward
+----------------------------------------------------------------------
+function RewardService:OpenGift(player, giftId)
+	if type(giftId) ~= "string" then
+		return { ok = false, error = "BadGiftId" }
+	end
+
+	-- Find and remove the gift from inventory atomically
+	local giftObj = nil
+	local removeOk = false
+
+	pcall(function()
+		local ok2 = self.DataService:Update(player, function(data)
+			data.Rewards = data.Rewards or {}
+			data.Rewards.GiftInventory = data.Rewards.GiftInventory or {}
+
+			for i, gift in ipairs(data.Rewards.GiftInventory) do
+				if type(gift) == "table" and gift.id == giftId then
+					giftObj = gift
+					table.remove(data.Rewards.GiftInventory, i)
+					return true
+				end
+			end
+			return false, "GiftNotFound"
+		end)
+		removeOk = ok2
+	end)
+
+	if not removeOk or not giftObj then
+		return { ok = false, error = "GiftNotFound" }
+	end
+
+	local rarity = tonumber(giftObj.rarity) or 1
+	local giftDef = GiftConfig.GetGift(rarity)
+	if not giftDef then
+		return { ok = false, error = "NoGiftConfig" }
+	end
+
+	-- Build loot entries, applying luck boost if applicable
+	local lootEntries = giftDef.loot
+	local profile = self:GetProfile(player)
+	local luckMult = 1
+	if profile and type(profile.Boosts) == "table" then
+		luckMult = tonumber(profile.Boosts.LuckMult) or 1
+	end
+
+	if luckMult > 1 then
+		-- Scale weights of high-tier entries by luck multiplier
+		local adjusted = {}
+		for i, entry in ipairs(lootEntries) do
+			local e = {}
+			for k, v in pairs(entry) do
+				e[k] = v
+			end
+			if (tonumber(e.tier) or 1) >= 3 then
+				e.weight = e.weight * luckMult
+			end
+			adjusted[i] = e
+		end
+		lootEntries = adjusted
+	end
+
+	local lt = LootTable.new(lootEntries)
+
+	-- Load pity state
+	local giftKey = GiftConfig.RarityToKey[rarity] or "Common"
+	local pityStateKey = "Gift_" .. giftKey
+	local pityState = { misses = 0 }
+
+	pcall(function()
+		self.DataService:Update(player, function(data)
+			data.Rewards = data.Rewards or {}
+			data.Rewards.Pity = data.Rewards.Pity or {}
+			if type(data.Rewards.Pity[pityStateKey]) ~= "table" then
+				data.Rewards.Pity[pityStateKey] = { misses = 0 }
+			end
+			pityState = data.Rewards.Pity[pityStateKey]
+			return true
+		end)
+	end)
+
+	-- Roll with pity
+	local rolledEntry = lt:RollWithPity(pityState, giftDef.pity)
+
+	-- Save pity state back
+	pcall(function()
+		self.DataService:Update(player, function(data)
+			data.Rewards = data.Rewards or {}
+			data.Rewards.Pity = data.Rewards.Pity or {}
+			data.Rewards.Pity[pityStateKey] = pityState
+			return true
+		end)
+	end)
+
+	-- Grant the reward
+	local grantOk, grantDesc = RewardGranter.Grant(player, rolledEntry)
+
+	-- Sync updated inventory to client
+	if self.NetService then
+		local prof = self:GetProfile(player)
+		local inv = prof and prof.Rewards and prof.Rewards.GiftInventory or {}
+		self.NetService:QueueDelta(player, "GiftInventory", inv)
+		self.NetService:FlushDelta(player)
+	end
+
+	return {
+		ok = true,
+		giftKey = giftKey,
+		rarity = rarity,
+		result = {
+			kind = rolledEntry.kind,
+			tier = rolledEntry.tier or 1,
+			description = grantDesc,
+			success = grantOk,
+			weaponKey = rolledEntry.weaponKey,
+			amount = rolledEntry.amount,
+			steps = rolledEntry.steps,
+			boostType = rolledEntry.boostType,
+			mult = rolledEntry.mult,
+			duration = rolledEntry.duration,
+		},
+	}
+end
+
+----------------------------------------------------------------------
+-- KeepGift: gift stays in inventory (no-op, dismisses prompt)
+----------------------------------------------------------------------
+function RewardService:KeepGift(player, giftId)
+	if type(giftId) ~= "string" then
+		return { ok = false, error = "BadGiftId" }
+	end
+
+	-- Verify the gift exists
+	local profile = self:GetProfile(player)
+	if not profile then
+		return { ok = false, error = "NoProfile" }
+	end
+
+	local inv = profile.Rewards and profile.Rewards.GiftInventory
+	if type(inv) ~= "table" then
+		return { ok = false, error = "NoInventory" }
+	end
+
+	for _, gift in ipairs(inv) do
+		if type(gift) == "table" and gift.id == giftId then
+			return { ok = true, kept = true, giftId = giftId }
+		end
+	end
+
+	return { ok = false, error = "GiftNotFound" }
+end
+
+----------------------------------------------------------------------
+-- GetGiftInventory: return the player's gift inventory for UI
+----------------------------------------------------------------------
+function RewardService:GetGiftInventory(player)
+	local profile = self:GetProfile(player)
+	if not profile then
+		return { ok = false, error = "NoProfile" }
+	end
+
+	local inv = profile.Rewards and profile.Rewards.GiftInventory or {}
+	return {
+		ok = true,
+		inventory = inv,
+	}
 end
 
 return RewardService

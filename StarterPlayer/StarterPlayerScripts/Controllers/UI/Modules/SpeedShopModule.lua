@@ -1,30 +1,26 @@
 --!strict
 -- SpeedShopModule.lua  |  Frame: SpeedShop
--- Shop for walkspeed boost purchases. Sequential tiers — must buy in order.
+-- Frame-based speed shop. Shows the next several upgrade steps using
+-- the step-based SpeedConfig (104 steps, +1 speed each).
 --
 -- WIRE-UP NOTES:
 --   Frame "SpeedShop"
 --     ├─ ItemList    (ScrollingFrame)
 --     │    └─ SpeedCard (Template, Visible=false)
---     │         ├─ TierName   (TextLabel e.g. "Speed Tier 1")
---     │         ├─ SpeedValue (TextLabel e.g. "+2 WalkSpeed")
+--     │         ├─ TierName   (TextLabel e.g. "Step 3")
+--     │         ├─ SpeedValue (TextLabel e.g. "+1 Speed")
 --     │         ├─ PriceLabel (TextLabel)
 --     │         └─ BuyButton  (TextButton)
 --     ├─ CurrentSpeed (TextLabel – shows current walkspeed)
 --     ├─ CashLabel    (TextLabel)
 --     └─ XButton  (TextButton)
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local SpeedShopModule = {}
 SpeedShopModule.__index = SpeedShopModule
 
--- Inline fallback tier definitions until SpeedConfig exists
-local DEFAULT_TIERS = {
-	{ Name = "Quick Feet",   SpeedBonus = 2,  Price = 500   },
-	{ Name = "Jogger",       SpeedBonus = 4,  Price = 1500  },
-	{ Name = "Runner",       SpeedBonus = 7,  Price = 4000  },
-	{ Name = "Sprinter",     SpeedBonus = 12, Price = 10000 },
-	{ Name = "Speedrunner",  SpeedBonus = 20, Price = 30000 },
-}
+local PREVIEW_COUNT = 5 -- how many upcoming steps to show
 
 local function find(parent: Instance, name: string): Instance?
 	return parent:FindFirstChild(name, true)
@@ -43,19 +39,40 @@ local function getCash(ctx: any): number
 	return (s.Currency and s.Currency.Cash) or 0
 end
 
-local function getSpeedTier(ctx: any): number
+local function getSpeedStep(ctx: any): number
 	local s = (ctx.State and ctx.State.State) or {}
-	return (s.Progression and s.Progression.SpeedTier) or 0
+	return (s.Progression and s.Progression.SpeedStep) or 0
 end
 
-function SpeedShopModule:_getTiers(): { any }
-	local cfg = self._ctx.Config.SpeedConfig
-	return (cfg and cfg.Tiers) or DEFAULT_TIERS
+local function getSpeedBoost(ctx: any): number
+	local s = (ctx.State and ctx.State.State) or {}
+	return (s.Progression and tonumber(s.Progression.SpeedBoost)) or 0
 end
 
-function SpeedShopModule:_buildCard(template: Frame, tier: any, index: number)
+-- Load SpeedConfig for formula
+local _speedConfig: any = nil
+local function getSpeedConfig(): any
+	if _speedConfig then return _speedConfig end
+	local ok, cfg = pcall(function()
+		local shared = ReplicatedStorage:WaitForChild("Shared", 5)
+		local cfgFolder = shared and shared:WaitForChild("Config", 5)
+		return cfgFolder and require(cfgFolder:WaitForChild("SpeedConfig", 5))
+	end)
+	if ok and cfg then _speedConfig = cfg end
+	return _speedConfig
+end
+
+local function getStepValues(step: number): (number, number)
+	local cfg = getSpeedConfig()
+	if cfg and cfg.GetStep then return cfg.GetStep(step) end
+	return 1, 500
+end
+
+function SpeedShopModule:_buildCard(template: Frame, stepIndex: number)
+	local amount, price = getStepValues(stepIndex)
+
 	local card = template:Clone()
-	card.Name    = "Tier_" .. tostring(index)
+	card.Name    = "Step_" .. tostring(stepIndex)
 	card.Visible = true
 
 	local nameLbl  = find(card, "TierName")   :: TextLabel?
@@ -63,19 +80,20 @@ function SpeedShopModule:_buildCard(template: Frame, tier: any, index: number)
 	local priceLbl = find(card, "PriceLabel")  :: TextLabel?
 	local buyBtn   = find(card, "BuyButton")   :: TextButton?
 
-	if nameLbl  then nameLbl.Text  = tier.Name or ("Tier " .. tostring(index)) end
-	if speedLbl then speedLbl.Text = "+" .. tostring(tier.SpeedBonus) .. " Speed" end
-	if priceLbl then priceLbl.Text = "$" .. fmt(tier.Price or 0) end
+	if nameLbl  then nameLbl.Text  = "Step " .. tostring(stepIndex + 1) end
+	if speedLbl then speedLbl.Text = "+" .. tostring(amount) .. " Speed" end
+	if priceLbl then priceLbl.Text = "$" .. fmt(price) end
 
-	self._cards[index] = {
+	self._cards[stepIndex] = {
 		card   = card,
-		tier   = tier,
+		amount = amount,
+		price  = price,
 		buyBtn = buyBtn,
 	}
 
 	if buyBtn then
 		self._janitor:Add(buyBtn.MouseButton1Click:Connect(function()
-			self:_onPurchase(index, tier)
+			self:_onPurchase(stepIndex)
 		end))
 	end
 
@@ -87,10 +105,14 @@ function SpeedShopModule:_populate()
 	local template = itemList and find(itemList, "SpeedCard")
 	if not (itemList and template) then return end
 
+	-- Clear old cards
 	for k, rec in pairs(self._cards) do rec.card:Destroy(); self._cards[k] = nil end
 
-	for i, tier in ipairs(self:_getTiers()) do
-		local card = self:_buildCard(template :: Frame, tier, i)
+	-- Build cards for the next PREVIEW_COUNT steps
+	local currentStep = getSpeedStep(self._ctx)
+	for i = 0, PREVIEW_COUNT - 1 do
+		local stepIdx = currentStep + i
+		local card = self:_buildCard(template :: Frame, stepIdx)
 		if card then card.Parent = itemList end
 	end
 
@@ -98,20 +120,20 @@ function SpeedShopModule:_populate()
 end
 
 function SpeedShopModule:_refreshCards()
-	local cash      = getCash(self._ctx)
-	local ownedTier = getSpeedTier(self._ctx)
+	local cash        = getCash(self._ctx)
+	local currentStep = getSpeedStep(self._ctx)
 
-	for idx, rec in pairs(self._cards) do
+	for stepIdx, rec in pairs(self._cards) do
 		local btn = rec.buyBtn
 		if not btn then continue end
-		local price = rec.tier.Price or 0
 
-		if idx <= ownedTier then
-			-- Already purchased
+		if stepIdx < currentStep then
+			-- Already purchased (shouldn't normally appear, but handle it)
 			btn.Text   = "Owned"
 			btn.Active = false
-		elseif idx == ownedTier + 1 then
-			-- Next available tier
+		elseif stepIdx == currentStep then
+			-- Next purchasable step
+			local _, price = getStepValues(stepIdx)
 			if cash >= price then
 				btn.Text   = "Buy"
 				btn.Active = true
@@ -120,16 +142,16 @@ function SpeedShopModule:_refreshCards()
 				btn.Active = false
 			end
 		else
-			-- Locked — need previous tier first
+			-- Future steps — locked until previous purchased
 			btn.Text   = "Locked"
 			btn.Active = false
 		end
 	end
 end
 
-function SpeedShopModule:_onPurchase(index: number, tier: any)
+function SpeedShopModule:_onPurchase(stepIndex: number)
 	local ctx = self._ctx
-	local rec = self._cards[index]
+	local rec = self._cards[stepIndex]
 
 	if rec and rec.buyBtn and not rec.buyBtn.Active then
 		ctx.UI.Effects.Shake(rec.buyBtn, 5, 0.25, 0.1)
@@ -139,10 +161,12 @@ function SpeedShopModule:_onPurchase(index: number, tier: any)
 	task.spawn(function()
 		local rf = ctx.Net:GetFunction("ShopAction")
 		local ok, result = pcall(function()
-			return rf:InvokeServer({ action = "buySpeed", tierIndex = index })
+			return rf:InvokeServer({ action = "buySpeed" })
 		end)
 		if ok and type(result) == "table" and result.ok then
 			ctx.UI.Sound:Play("cartoon_pop")
+			-- Re-populate to shift the step window forward
+			self:_populate()
 		else
 			if rec and rec.buyBtn then ctx.UI.Effects.Shake(rec.buyBtn, 6, 0.3, 0.12) end
 		end
@@ -150,11 +174,12 @@ function SpeedShopModule:_onPurchase(index: number, tier: any)
 end
 
 function SpeedShopModule:_refreshSpeedLabel()
+	local boost = getSpeedBoost(self._ctx)
+	local cfg = getSpeedConfig()
+	local base = (cfg and cfg.BaseSpeed) or 16
 	local lbl = find(self._frame, "CurrentSpeed") :: TextLabel?
-	local char = self._ctx.Player.Character
-	if lbl and char then
-		local hum = char:FindFirstChildOfClass("Humanoid")
-		if hum then lbl.Text = "Speed: " .. tostring(math.floor(hum.WalkSpeed)) end
+	if lbl then
+		lbl.Text = "Speed: " .. tostring(math.floor(base + boost))
 	end
 	local cashLbl = find(self._frame, "CashLabel") :: TextLabel?
 	if cashLbl then cashLbl.Text = "$" .. fmt(getCash(self._ctx)) end

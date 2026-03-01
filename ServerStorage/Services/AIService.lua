@@ -584,7 +584,16 @@ function AIService:_stepOne(entry: AIEntry)
 			if t >= entry.NextAttackAt then
 				entry.NextAttackAt = t + attackCd
 				pcall(function()
-					thum:TakeDamage(attackDamage)
+					-- Route damage through armor first, overflow hits health
+					local armorSvc = self.Services and self.Services.ArmorService
+					if armorSvc and target then
+						local absorbed, overflow = armorSvc:DamageArmor(target, attackDamage)
+						if overflow > 0 then
+							thum:TakeDamage(overflow)
+						end
+					else
+						thum:TakeDamage(attackDamage)
+					end
 				end)
 			end
 		end
