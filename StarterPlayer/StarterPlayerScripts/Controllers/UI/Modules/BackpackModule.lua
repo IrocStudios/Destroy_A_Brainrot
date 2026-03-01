@@ -2,14 +2,20 @@
 -- BackpackModule.lua  |  Frame: Backpack
 -- Displays all weapons the player owns. Each card can be toggled to
 -- select / deselect the weapon in the toolbar. Selection is persisted.
+-- Also displays gift inventory cards alongside weapons — one card per gift
+-- type with a quantity badge. Clicking a gift card opens the Open/Keep prompt.
 --
 -- Data source: ReplicatedStorage/Weapons/<FolderName> folders
 --   - @DisplayName (string), @Damage (number), @Rarity (1-6), @Category ("Normal"/"Gold"/"Diamond")
 --   - Tool [Tool] child — the actual equippable tool
 --   - Icon [ImageLabel] child — card icon
 --
+-- Gift data: ReplicatedStorage/ShopAssets/Gifts/<GiftKey> folders
+--   - @DisplayName (string), Icon [ImageLabel]
+--
 -- State: ctx.State.State.Inventory.WeaponsOwned  (array of folder names)
 --        ctx.State.State.Inventory.SelectedWeapons (array of folder names)
+--        ctx.State.State.Rewards.GiftInventory (array of gift objects)
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService      = game:GetService("TweenService")
@@ -141,6 +147,23 @@ local function getOwnedList(ctx: any): { string }
 	return {}
 end
 
+--- Get the gift inventory array from state
+local function getGiftInventory(ctx: any): { any }
+	local s = (ctx.State and ctx.State.State) or {}
+	local rewards = s.Rewards or {}
+	return rewards.GiftInventory or {}
+end
+
+--- Get gift asset folder from ShopAssets/Gifts/[giftKey]
+local function getGiftAsset(giftKey: string): Folder?
+	local ok, result = pcall(function()
+		return ReplicatedStorage:FindFirstChild("ShopAssets")
+			and ReplicatedStorage.ShopAssets:FindFirstChild("Gifts")
+			and ReplicatedStorage.ShopAssets.Gifts:FindFirstChild(giftKey)
+	end)
+	return ok and result or nil
+end
+
 --- Collect weapon metadata from ReplicatedStorage/Weapons, grouped by category
 local function collectWeapons(): { [string]: { any } }
 	local weaponsFolder = ReplicatedStorage:FindFirstChild("Weapons")
@@ -209,7 +232,9 @@ function BackpackModule:_clearContainer()
 	local container = self._container
 	if not container then return end
 	for _, child in container:GetChildren() do
-		if child:IsA("Frame") and child.Name ~= "_bumpertop" and child.Name ~= "_bumperbottom" then
+		-- Destroy holder rows (weapons) and gift cards (TextButton), keep bumpers + layout
+		if child.Name == "_bumpertop" or child.Name == "_bumperbottom" then continue end
+		if child:IsA("Frame") or child:IsA("TextButton") then
 			child:Destroy()
 		end
 	end
@@ -342,6 +367,185 @@ function BackpackModule:_populateContainer()
 
 		card.Parent = currentHolder
 		countInRow += 1
+	end
+
+	-- ── Append gift cards after weapons in the same container ────────────
+	self:_appendGiftCards(currentHolder, countInRow)
+end
+
+-- ── Gift Inventory ──────────────────────────────────────────────────────────
+
+--- Append gift inventory cards after weapon cards, continuing the current holder row.
+--- @param lastHolder Frame? — the last holder row from weapon population (may have room)
+--- @param lastCount number — how many items are already in lastHolder
+function BackpackModule:_appendGiftCards(lastHolder: Frame?, lastCount: number)
+	local giftInventory = getGiftInventory(self._ctx)
+	if #giftInventory == 0 then return end
+
+	local template = self._resources:FindFirstChild("Template_Gift")
+	if not template then return end
+
+	-- Group gifts by giftKey → { giftKey, count, ids[] }
+	local grouped: { [string]: { giftKey: string, count: number, ids: { string } } } = {}
+	local keyOrder: { string } = {}
+
+	for _, gift in ipairs(giftInventory) do
+		local key = gift.giftKey or "Blue"
+		if not grouped[key] then
+			grouped[key] = { giftKey = key, count = 0, ids = {} }
+			table.insert(keyOrder, key)
+		end
+		grouped[key].count += 1
+		table.insert(grouped[key].ids, gift.id)
+	end
+
+	table.sort(keyOrder)
+
+	local holderTemplate = self._resources.Holder
+	local currentHolder = lastHolder
+	local countInRow = lastCount
+
+	for _, giftKey in ipairs(keyOrder) do
+		local group = grouped[giftKey]
+
+		-- Need a new holder row?
+		if countInRow == 0 or countInRow >= ITEMS_PER_ROW or currentHolder == nil then
+			currentHolder = holderTemplate:Clone()
+			currentHolder.Visible = true
+			currentHolder.Name = "Row"
+			currentHolder.Parent = self._container
+			countInRow = 0
+		end
+
+		local card = self:_buildGiftCard(group)
+		card.Parent = currentHolder
+		countInRow += 1
+	end
+end
+
+function BackpackModule:_buildGiftCard(group: any): TextButton
+	local template = self._resources:FindFirstChild("Template_Gift")
+	local card = template:Clone()
+	card.Visible = true
+	card.Name = "Gift_" .. group.giftKey
+
+	local giftKey = group.giftKey
+	local asset = getGiftAsset(giftKey)
+	local displayName = giftKey
+	local iconImage = ""
+
+	if asset then
+		displayName = asset:GetAttribute("DisplayName") or giftKey
+		local iconLabel = asset:FindFirstChild("Icon")
+		if iconLabel and iconLabel:IsA("ImageLabel") then
+			iconImage = iconLabel.Image
+		end
+	end
+
+	local container = card:FindFirstChild("container")
+	if container then
+		-- Title + shadow
+		local title = container:FindFirstChild("Title")
+		if title and title:IsA("TextLabel") then
+			title.Text = displayName
+			local shadow = title:FindFirstChild("Title2")
+			if shadow and shadow:IsA("TextLabel") then
+				shadow.Text = displayName
+			end
+		end
+
+		-- Rarity label → show "Gift"
+		local rarLabel = container:FindFirstChild("Rarity")
+		if rarLabel and rarLabel:IsA("TextLabel") then
+			rarLabel.Text = "Gift"
+			local shadow = rarLabel:FindFirstChild("Rarity2")
+			if shadow and shadow:IsA("TextLabel") then
+				shadow.Text = "Gift"
+			end
+		end
+
+		-- Quantify (quantity) + shadow
+		local qtyLabel = container:FindFirstChild("Quantify")
+		if qtyLabel and qtyLabel:IsA("TextLabel") then
+			if group.count > 1 then
+				qtyLabel.Text = "x" .. tostring(group.count)
+				qtyLabel.Visible = true
+				local shadow = qtyLabel:FindFirstChild("Damage2")
+				if shadow and shadow:IsA("TextLabel") then
+					shadow.Text = "x" .. tostring(group.count)
+				end
+			else
+				qtyLabel.Visible = false
+			end
+		end
+
+		-- Gift icon in IconHolder
+		local iconHolder = container:FindFirstChild("IconHolder")
+		if iconHolder then
+			local img = iconHolder:FindFirstChild("x")
+			if img and img:IsA("ImageLabel") then
+				img.Image = iconImage
+				img.Visible = true
+			end
+		end
+
+		-- Stud background image
+		local stud = container:FindFirstChild("Stud")
+		if stud and stud:IsA("ImageLabel") then
+			stud.Image = iconImage
+		end
+
+		-- Hide "New!" label
+		local newLabel = container:FindFirstChild("newlabel")
+		if newLabel and newLabel:IsA("GuiObject") then
+			newLabel.Visible = false
+		end
+
+		-- Hide "Selected" frame
+		local selected = container:FindFirstChild("Selected")
+		if selected and selected:IsA("GuiObject") then
+			selected.Visible = false
+		end
+
+		-- Apply rarity gradients using "Common" style (gifts don't have weapon rarity)
+		applyRarityGradients(container, "Common")
+	end
+
+	-- Click handler: open the gift prompt via OpenGiftModule
+	card.MouseButton1Click:Connect(function()
+		self:_openGiftFromInventory(group)
+	end)
+
+	return card
+end
+
+function BackpackModule:_openGiftFromInventory(group: any)
+	if not group or not group.ids or #group.ids == 0 then return end
+
+	-- Use the first gift ID from the group
+	local giftId = group.ids[1]
+	local giftKey = group.giftKey
+	local asset = getGiftAsset(giftKey)
+	local displayName = giftKey
+	if asset then
+		displayName = asset:GetAttribute("DisplayName") or giftKey
+	end
+
+	-- Access OpenGiftModule through ctx and call Prompt
+	local openGift = self._ctx.OpenGift
+	if openGift and type(openGift.Prompt) == "function" then
+		-- Close backpack first
+		if self._ctx.Router then
+			self._ctx.Router:Close("Backpack")
+		end
+		-- Prompt with fromInventory flag
+		openGift:Prompt({
+			id            = giftId,
+			giftKey       = giftKey,
+			source        = "inventory",
+			displayName   = displayName,
+			fromInventory = true,
+		})
 	end
 end
 
@@ -556,7 +760,11 @@ function BackpackModule:Init(ctx: any)
 				end))
 			end
 		end
+
 	end
+
+	-- Register on ctx so OpenGiftModule can find us for reopen
+	ctx.Backpack = self
 
 	-- Initial populate
 	self:_populateContainer()

@@ -91,6 +91,9 @@ function StateController:ApplyDelta(deltaList)
 		elseif key == "GiftCooldowns" then
 			self.State.Rewards = self.State.Rewards or {}
 			self.State.Rewards.GiftCooldowns = d.v
+		elseif key == "GiftInventory" then
+			self.State.Rewards = self.State.Rewards or {}
+			self.State.Rewards.GiftInventory = d.v
 		elseif key == "MusicOn" then
 			self.State.Settings = self.State.Settings or {}
 			self.State.Settings.MusicOn = d.v

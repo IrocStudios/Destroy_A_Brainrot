@@ -69,6 +69,9 @@ NetIds.Encode = {
 	-- Speed / Upgrades
 	SpeedBoost = 80,
 	SpeedStep = 81,
+
+	-- Gift inventory (array of gift objects synced on change)
+	GiftInventory = 33,
 }
 
 NetIds.Decode = {}

@@ -130,6 +130,23 @@ function RewardService:Start()
 			self:FlushStatus(player)
 		end)
 	end)
+
+	-- ── TEST: Give 3 Blue gifts 10 seconds after spawn ─────────────────
+	-- Remove this block once gift sources (daily, kill, etc.) are fully wired.
+	local function giveTestGifts(player)
+		task.delay(10, function()
+			if not player.Parent then return end
+			for i = 1, 3 do
+				-- First gift prompts, rest go silent to inventory
+				self:ReceiveGift(player, "Blue", "test", i > 1)
+			end
+			print("[RewardService] TEST: Gave " .. player.Name .. " 3 Blue gifts")
+		end)
+	end
+	Players.PlayerAdded:Connect(giveTestGifts)
+	for _, player in ipairs(Players:GetPlayers()) do
+		giveTestGifts(player)
+	end
 end
 
 ----------------------------------------------------------------------
@@ -436,16 +453,14 @@ function RewardService:ClaimGift(player, giftId)
 end
 
 ----------------------------------------------------------------------
--- OnBrainrotKilled: existing kill gift drop + NEW rarity gift to inventory
+-- OnBrainrotKilled: existing kill gift drop + gift to inventory
 ----------------------------------------------------------------------
 function RewardService:OnBrainrotKilled(player, brainrotInfo)
 	if not player or not player.Parent then return end
 
 	local rarityName = nil
-	local rarityNum = 1
 	if type(brainrotInfo) == "table" then
 		rarityName = brainrotInfo.rarity or brainrotInfo.Rarity
-		rarityNum = tonumber(brainrotInfo.rarityNum or brainrotInfo.RarityNum) or 1
 	end
 
 	local chance = self.KillGiftDropChanceBase
@@ -461,34 +476,26 @@ function RewardService:OnBrainrotKilled(player, brainrotInfo)
 		return
 	end
 
-	-- Determine gift rarity from killed brainrot's rarity
-	-- Map name to number if needed
-	if rarityNum <= 1 and rarityName then
-		local RarityToNum = {
-			Common = 1, Uncommon = 2, Rare = 3, Epic = 4,
-			Legendary = 5, Mythic = 6, Transcendent = 7,
-		}
-		rarityNum = RarityToNum[rarityName] or 1
-	end
-
-	-- Add gift directly to inventory (enemy drops skip the prompt)
-	self:ReceiveGift(player, rarityNum, "kill", true)
+	-- All kill drops give a Blue gift for now (expand later with rarity mapping)
+	self:ReceiveGift(player, "Blue", "kill", true)
 end
 
 ----------------------------------------------------------------------
 -- ReceiveGift: add a gift to the player's inventory
+-- giftKey = folder name in ShopAssets.Gifts (e.g. "Blue", "Purple")
 -- skipPrompt = true for enemy drops (silent → inventory only)
 -- skipPrompt = false for daily/friend gifts (fires prompt notification)
 ----------------------------------------------------------------------
-function RewardService:ReceiveGift(player, rarity, source, skipPrompt)
-	rarity = tonumber(rarity) or 1
-	rarity = clamp(rarity, 1, 7)
+function RewardService:ReceiveGift(player, giftKey, source, skipPrompt)
+	giftKey = tostring(giftKey or "Blue")
 	source = tostring(source or "unknown")
 
 	local t = now()
 	local giftObj = nil
 
-	pcall(function()
+	print("[RewardService] ReceiveGift:", giftKey, source, "skipPrompt:", skipPrompt)
+
+	local updateOk, updateErr = pcall(function()
 		self.DataService:Update(player, function(data)
 			data.Rewards = data.Rewards or {}
 			data.Rewards.GiftInventory = data.Rewards.GiftInventory or {}
@@ -499,7 +506,7 @@ function RewardService:ReceiveGift(player, rarity, source, skipPrompt)
 
 			giftObj = {
 				id = id,
-				rarity = rarity,
+				giftKey = giftKey,
 				source = source,
 				receivedAt = t,
 			}
@@ -507,6 +514,11 @@ function RewardService:ReceiveGift(player, rarity, source, skipPrompt)
 			return true
 		end)
 	end)
+
+	if not updateOk then
+		warn("[RewardService] ReceiveGift Update failed:", updateErr)
+	end
+	print("[RewardService] ReceiveGift giftObj:", giftObj and giftObj.id or "NIL")
 
 	if not giftObj then return nil end
 
@@ -520,10 +532,11 @@ function RewardService:ReceiveGift(player, rarity, source, skipPrompt)
 
 	if not skipPrompt then
 		-- Fire notification so client shows Open/Keep prompt
-		local displayName = GiftConfig.GetDisplayName(rarity)
+		local displayName = GiftConfig.GetDisplayName(giftKey)
+		print("[RewardService] Sending giftReceived notify:", giftObj.id, giftKey, displayName)
 		self:NotifyEvent(player, "giftReceived", {
 			giftId = giftObj.id,
-			rarity = rarity,
+			giftKey = giftKey,
 			source = source,
 			displayName = displayName,
 		})
@@ -568,8 +581,9 @@ function RewardService:OpenGift(player, giftId)
 		return { ok = false, error = "GiftNotFound" }
 	end
 
-	local rarity = tonumber(giftObj.rarity) or 1
-	local giftDef = GiftConfig.GetGift(rarity)
+	-- Gift key is now a string (e.g. "Blue", "Purple")
+	local giftKey = tostring(giftObj.giftKey or "Blue")
+	local giftDef = GiftConfig.GetGift(giftKey)
 	if not giftDef then
 		return { ok = false, error = "NoGiftConfig" }
 	end
@@ -600,8 +614,7 @@ function RewardService:OpenGift(player, giftId)
 
 	local lt = LootTable.new(lootEntries)
 
-	-- Load pity state
-	local giftKey = GiftConfig.RarityToKey[rarity] or "Common"
+	-- Load pity state (keyed by gift type)
 	local pityStateKey = "Gift_" .. giftKey
 	local pityState = { misses = 0 }
 
@@ -644,7 +657,6 @@ function RewardService:OpenGift(player, giftId)
 	return {
 		ok = true,
 		giftKey = giftKey,
-		rarity = rarity,
 		result = {
 			kind = rolledEntry.kind,
 			tier = rolledEntry.tier or 1,
