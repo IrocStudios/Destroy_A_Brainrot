@@ -91,8 +91,8 @@ end
 
 -- ── Rarity config ───────────────────────────────────────────────────────────
 
-local _rarityConfigInst = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("RarityConfig")
-local _rarityConfigData = require(_rarityConfigInst)
+local _rarityGradients = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("RarityGradients")
+local _rarityConfigData = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("RarityConfig"))
 
 local PRODUCT_RARITY_TAG = "UseProductRarityColor"
 
@@ -127,7 +127,7 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 	for _, desc in parent:GetDescendants() do
 		if desc:IsA("UIGradient") then
 			if desc.Name == "RarityGradient" then
-				local source = _rarityConfigInst:FindFirstChild(rarityName)
+				local source = _rarityGradients:FindFirstChild(rarityName)
 				if source and source:IsA("UIGradient") then
 					local color = source.Color
 					if desc.Parent and desc.Parent:IsA("TextLabel") then
@@ -141,7 +141,7 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 					CollectionService:RemoveTag(desc, "RainbowGradient")
 				end
 			elseif desc.Name == "RarityGradientStroke" then
-				local source = _rarityConfigInst:FindFirstChild(rarityName .. "Stroke")
+				local source = _rarityGradients:FindFirstChild(rarityName .. "Stroke")
 				if source and source:IsA("UIGradient") then
 					desc.Color = source.Color
 				end
@@ -406,17 +406,20 @@ function BuyWeaponModule:_colorizeStand(standData: any)
 	if not standRoot then return end
 
 	-- Paint every tagged BasePart to the rarity color
+	local isTranscendent = standData.rarity == 7
 	for _, desc in ipairs(standRoot:GetDescendants()) do
 		if desc:IsA("BasePart") and CollectionService:HasTag(desc, PRODUCT_RARITY_TAG) then
-			desc.Color = rarityColor
-		end
-	end
-
-	-- Set every Highlight: outline = rarity color, fill = 25% lighter
-	for _, desc in ipairs(standRoot:GetDescendants()) do
-		if desc:IsA("Highlight") then
-			desc.OutlineColor = rarityColor
-			desc.FillColor = fillColor
+			if isTranscendent then
+				if desc.Material == Enum.Material.Neon then
+					-- Neon parts → rainbow cycle (RainbowRarityAnimator picks these up)
+					CollectionService:AddTag(desc, "RainbowNeonPart")
+				else
+					-- Smooth / SmoothPlastic / everything else → bright white
+					desc.Color = Color3.new(1, 1, 1)
+				end
+			else
+				desc.Color = rarityColor
+			end
 		end
 	end
 
@@ -425,8 +428,11 @@ function BuyWeaponModule:_colorizeStand(standData: any)
 
 	for _, desc in ipairs(standRoot:GetDescendants()) do
 		if desc:IsA("BillboardGui") and desc.Name == "StandBoard" then
+			-- Container may be a "Frame" child wrapper or the BillboardGui itself
+			local container = desc:FindFirstChild("Frame") or desc
+
 			-- WeaponName + shadow Title
-			local weaponNameLbl = desc:FindFirstChild("Frame") and desc.Frame:FindFirstChild("WeaponName")
+			local weaponNameLbl = container:FindFirstChild("WeaponName")
 			if weaponNameLbl and weaponNameLbl:IsA("TextLabel") then
 				weaponNameLbl.Text = standData.displayName
 				local title = weaponNameLbl:FindFirstChild("Title")
@@ -436,7 +442,7 @@ function BuyWeaponModule:_colorizeStand(standData: any)
 			end
 
 			-- Rarity text + gradient
-			local rarityLbl = desc:FindFirstChild("Frame") and desc.Frame:FindFirstChild("Rarity")
+			local rarityLbl = container:FindFirstChild("Rarity")
 			if rarityLbl and rarityLbl:IsA("TextLabel") then
 				rarityLbl.Text = rarityName
 				-- Apply rarity gradient from RarityConfig
@@ -444,7 +450,7 @@ function BuyWeaponModule:_colorizeStand(standData: any)
 			end
 
 			-- Cost
-			local costLbl = desc:FindFirstChild("Frame") and desc.Frame:FindFirstChild("Cost")
+			local costLbl = container:FindFirstChild("Cost")
 			if costLbl and costLbl:IsA("TextLabel") then
 				costLbl.Text = fmt(standData.cost)
 			end
@@ -539,6 +545,11 @@ function BuyWeaponModule:_spawnDisplayWeapon(standData: any)
 	highlight.OutlineTransparency = 0.2
 	highlight.DepthMode = Enum.HighlightDepthMode.Occluded
 	highlight.Parent = clone
+
+	-- Transcendent → rainbow-cycling highlight (RainbowRarityAnimator picks this up)
+	if standData.rarity == 7 then
+		CollectionService:AddTag(highlight, "RainbowHighlight")
+	end
 
 	-- Store the base CFrame (rotation-neutral at Glass center) for animation
 	-- We want the weapon's default orientation preserved, just positioned at Glass

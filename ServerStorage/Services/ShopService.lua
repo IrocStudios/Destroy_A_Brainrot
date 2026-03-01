@@ -86,24 +86,23 @@ end
 function ShopService:Start()
 	self:_scanStations()
 
-	-- On profile load, sync SpeedBoost + SpeedTier + ArmorTier to client
+	-- On profile load, sync SpeedBoost + SpeedStep + ArmorStep to client
 	if self.DataService then
 		self.DataService.OnProfileLoaded:Connect(function(player, data)
 			if not self.Net then return end
 
-			-- Speed
-			local speedTier = (data.Progression and data.Progression.SpeedTier) or 0
-			local speedBonus = 0
-			if speedTier > 0 and SpeedConfig and SpeedConfig.Tiers then
-				local t = SpeedConfig.Tiers[speedTier]
-				if t then speedBonus = tonumber(t.SpeedBonus) or 0 end
+			-- Speed (step-based)
+			local speedStep = (data.Progression and data.Progression.SpeedStep) or 0
+			local speedBoost = 0
+			if speedStep > 0 and SpeedConfig and SpeedConfig.GetBoostForStep then
+				speedBoost = SpeedConfig.GetBoostForStep(speedStep)
 			end
-			self.Net:QueueDelta(player, "SpeedBoost", speedBonus)
-			self.Net:QueueDelta(player, "SpeedTier", speedTier)
+			self.Net:QueueDelta(player, "SpeedBoost", speedBoost)
+			self.Net:QueueDelta(player, "SpeedStep", speedStep)
 
-			-- Armor tier (Armor + MaxArmor already synced by ArmorService)
-			local armorTier = (data.Defense and data.Defense.ArmorTier) or 0
-			self.Net:QueueDelta(player, "ArmorTier", armorTier)
+			-- ArmorStep (Armor value already synced by ArmorService)
+			local armorStep = (data.Defense and data.Defense.ArmorStep) or 0
+			self.Net:QueueDelta(player, "ArmorStep", armorStep)
 
 			self.Net:FlushDelta(player)
 		end)
@@ -130,31 +129,24 @@ function ShopService:HandleShopAction(player: Player, payload: any)
 end
 
 -- ── Buy Speed ───────────────────────────────────────────────────────────────
+-- Step-based: each purchase adds +1 WalkSpeed (via SpeedBoost delta).
+-- SpeedConfig.GetStep(step) returns (amount, price) for the given step.
 
 function ShopService:_handleBuySpeed(player: Player, payload: any)
-	local tierIndex = tonumber(payload.tierIndex)
-	if not tierIndex then
-		return { ok = false, reason = "MissingTierIndex" }
-	end
-
-	local tiers = SpeedConfig and SpeedConfig.Tiers
-	if not tiers then
+	if not SpeedConfig or not SpeedConfig.GetStep then
 		return { ok = false, reason = "NoSpeedConfig" }
 	end
 
-	local tier = tiers[tierIndex]
-	if not tier then
-		return { ok = false, reason = "InvalidTier" }
-	end
+	-- Current step = number of purchases already made
+	local currentStep = self.DataService:GetValue(player, "Progression.SpeedStep") or 0
+	local amount, price = SpeedConfig.GetStep(currentStep)
 
-	-- Sequential: must buy the next tier in order
-	local currentTier = self.DataService:GetValue(player, "Progression.SpeedTier") or 0
-	if tierIndex ~= currentTier + 1 then
-		return { ok = false, reason = "WrongTier" }
+	-- Maxed out?
+	if amount == 0 then
+		return { ok = false, reason = "MaxedOut" }
 	end
 
 	-- Charge
-	local price = tonumber(tier.Price) or 0
 	if price > 0 then
 		local chargeOk, chargeErr = self.Economy:SpendCash(player, price)
 		if not chargeOk then
@@ -162,46 +154,44 @@ function ShopService:_handleBuySpeed(player: Player, payload: any)
 		end
 	end
 
-	-- Update profile
-	self.DataService:SetValue(player, "Progression.SpeedTier", tierIndex)
+	-- Advance step
+	local newStep = currentStep + 1
+	self.DataService:SetValue(player, "Progression.SpeedStep", newStep)
 
-	-- Sync deltas: SpeedBoost (the actual bonus number) + SpeedTier (for UI)
-	local speedBonus = tonumber(tier.SpeedBonus) or 0
+	-- SpeedBoost = total bonus (step count × SpeedPerStep)
+	local speedBoost = SpeedConfig.GetBoostForStep(newStep)
+
+	-- Sync deltas: SpeedBoost (actual bonus) + SpeedStep (for UI)
 	if self.Net then
-		self.Net:QueueDelta(player, "SpeedBoost", speedBonus)
-		self.Net:QueueDelta(player, "SpeedTier", tierIndex)
+		self.Net:QueueDelta(player, "SpeedBoost", speedBoost)
+		self.Net:QueueDelta(player, "SpeedStep", newStep)
 		self.Net:FlushDelta(player)
 	end
 
-	return { ok = true, tierIndex = tierIndex, speedBonus = speedBonus }
+	return { ok = true, speedAdded = amount, newStep = newStep, speedBoost = speedBoost }
 end
 
 -- ── Buy Armor ───────────────────────────────────────────────────────────────
+-- Formula-based: each purchase adds an increasing amount of armor.
+-- ArmorConfig.GetStep(step) returns (amount, price) for the given step.
 
 function ShopService:_handleBuyArmor(player: Player, payload: any)
-	local tierIndex = tonumber(payload.tierIndex)
-	if not tierIndex then
-		return { ok = false, reason = "MissingTierIndex" }
-	end
-
-	local tiers = ArmorConfig and ArmorConfig.Tiers
-	if not tiers then
+	if not ArmorConfig or not ArmorConfig.GetStep then
 		return { ok = false, reason = "NoArmorConfig" }
 	end
 
-	local tier = tiers[tierIndex]
-	if not tier then
-		return { ok = false, reason = "InvalidTier" }
-	end
+	-- Effective step based on current armor value (not purchase count).
+	-- If player takes damage and loses armor, effective step drops → cheaper price.
+	local currentArmor = tonumber(self.DataService:GetValue(player, "Defense.Armor")) or 0
+	local currentStep = ArmorConfig.GetEffectiveStep(currentArmor)
+	local amount, price = ArmorConfig.GetStep(currentStep)
 
-	-- Sequential: must buy the next tier in order
-	local currentTier = self.DataService:GetValue(player, "Defense.ArmorTier") or 0
-	if tierIndex ~= currentTier + 1 then
-		return { ok = false, reason = "WrongTier" }
+	-- Maxed out?
+	if amount == 0 then
+		return { ok = false, reason = "MaxedOut" }
 	end
 
 	-- Charge
-	local price = tonumber(tier.Price) or 0
 	if price > 0 then
 		local chargeOk, chargeErr = self.Economy:SpendCash(player, price)
 		if not chargeOk then
@@ -209,23 +199,14 @@ function ShopService:_handleBuyArmor(player: Player, payload: any)
 		end
 	end
 
-	-- Update ArmorTier in profile
-	self.DataService:SetValue(player, "Defense.ArmorTier", tierIndex)
-
-	-- Set MaxArmor via ArmorService (also fills armor to new max)
-	local armorBonus = tonumber(tier.ArmorBonus) or 0
+	-- Add armor + advance step via ArmorService
+	local added = 0
 	if self.ArmorService then
-		self.ArmorService:SetMaxArmor(player, armorBonus)
-		self.ArmorService:ReplenishArmor(player)
+		added = self.ArmorService:AddArmor(player, amount)
+		self.ArmorService:IncrementStep(player)
 	end
 
-	-- Sync ArmorTier delta for UI (Armor + MaxArmor already synced by ArmorService)
-	if self.Net then
-		self.Net:QueueDelta(player, "ArmorTier", tierIndex)
-		self.Net:FlushDelta(player)
-	end
-
-	return { ok = true, tierIndex = tierIndex, armorBonus = armorBonus }
+	return { ok = true, armorAdded = added, newStep = currentStep + 1 }
 end
 
 -- ── Legacy weapon station purchase ──────────────────────────────────────────

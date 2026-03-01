@@ -3,7 +3,7 @@
 -- HUDModule.lua  |  Frame: HUD  (persistent overlay)
 -- Manages the main heads-up display:
 --   • Cash display with animated gain/loss popups
---   • Speed display (reads "BaseSpeed" attribute on Player)
+--   • Speed display (reads SpeedBoost from state, adds to base 16)
 --   • XP bar + XP label + Level label
 --   • Nav buttons wired by Frames:BindButtons() via "Frame" attribute
 --
@@ -102,15 +102,9 @@ local function spawnCashPopup(ctx: any, popupsFrame: Frame, templateName: string
 	end)
 end
 
--- ── Speed (attribute-based) ──────────────────────────────────────────────────
--- Speed is the player's base speed, stored as an attribute on the Player instance.
--- It updates when upgraded (not every frame). Default = 16.
-local SPEED_ATTR = "BaseSpeed"
-
-local function getBaseSpeed(player: Player): number
-	local v = player:GetAttribute(SPEED_ATTR)
-	return (type(v) == "number" and v > 0) and v or 16
-end
+-- ── Speed (state-based) ─────────────────────────────────────────────────────
+-- Speed = base walk speed (16) + SpeedBoost from Progression state.
+local BASE_WALK_SPEED = 16
 
 -- ── Init ─────────────────────────────────────────────────────────────────────
 function HUDModule:Init(ctx: any)
@@ -118,8 +112,10 @@ function HUDModule:Init(ctx: any)
 	self._ctx     = ctx
 	self._janitor = ctx.UI.Cleaner.new()
 
-	-- Track previous cash for popup deltas
-	self._prevCash = nil :: number?
+	-- Track previous values for popup deltas
+	self._prevCash  = nil :: number?
+	self._prevSpeed = nil :: number?
+	self._prevArmor = nil :: number?
 
 	-- HUD lives directly in the ScreenGui, not inside FramesFolder
 	local root = ctx.RootGui
@@ -171,6 +167,22 @@ function HUDModule:Init(ctx: any)
 		print("[HUDController] - SpeedHolder: " .. tostring(speedHolder ~= nil))
 		print("[HUDController] - SpeedLabel (Value): " .. tostring(self._speedLabel ~= nil))
 
+		-- Speed valchange template (inside Value label)
+		self._speedValchange = self._speedLabel and (self._speedLabel :: Instance):FindFirstChild("valchange")
+		if self._speedValchange then (self._speedValchange :: TextLabel).Visible = false end
+		print("[HUDController] - SpeedValchange: " .. tostring(self._speedValchange ~= nil))
+
+		-- Armor
+		local armorHolder = infoHolder:FindFirstChild("ArmorHolder")
+		self._armorLabel = armorHolder and armorHolder:FindFirstChild("Value")
+		print("[HUDController] - ArmorHolder: " .. tostring(armorHolder ~= nil))
+		print("[HUDController] - ArmorLabel (Value): " .. tostring(self._armorLabel ~= nil))
+
+		-- Armor valchange template (inside Value label)
+		self._armorValchange = self._armorLabel and (self._armorLabel :: Instance):FindFirstChild("valchange")
+		if self._armorValchange then (self._armorValchange :: TextLabel).Visible = false end
+		print("[HUDController] - ArmorValchange: " .. tostring(self._armorValchange ~= nil))
+
 		-- XP
 		local xpHolder = infoHolder:FindFirstChild("XPHolder")
 		self._xpValue  = xpHolder and xpHolder:FindFirstChild("XPValue")
@@ -194,12 +206,7 @@ function HUDModule:Init(ctx: any)
 	-- No manual wiring here to avoid double-toggle.
 	print("[HUDController] - Nav buttons handled by Frames:BindButtons()")
 
-	-- Initial speed display (from player attribute)
-	local initSpeed = getBaseSpeed(ctx.Player)
-	print("[HUDController] - Initial BaseSpeed attr: " .. tostring(initSpeed))
-	self:_updateSpeed(initSpeed)
-
-	-- Initial state refresh
+	-- Initial state refresh (speed is read from state, not player attribute)
 	local initState = ctx.State and ctx.State.State or {}
 	print("[HUDController] - Initial state keys: " .. tostring(initState.Currency ~= nil and "Currency " or "") .. tostring(initState.Progression ~= nil and "Progression " or ""))
 	self:_refresh(initState)
@@ -222,26 +229,60 @@ function HUDModule:Start()
 	end))
 	print("[HUDController] - Subscribed to State.Changed")
 
-	-- Listen for BaseSpeed attribute changes (set by server when speed is upgraded)
-	self._janitor:Add(ctx.Player:GetAttributeChangedSignal(SPEED_ATTR):Connect(function()
-		local newSpeed = getBaseSpeed(ctx.Player)
-		print("[HUDController] - BaseSpeed attribute changed: " .. tostring(newSpeed))
-		self:_updateSpeed(newSpeed)
-	end))
-
 	print("[HUDController] - Start complete")
 end
 
--- ── Speed Helper ─────────────────────────────────────────────────────────────
+-- ── Valchange Popup ──────────────────────────────────────────────────────────
+-- Clones the valchange template, shows the delta text, tweens up + fades out.
+-- Parent is the Value label itself — the popup floats above it.
 
-function HUDModule:_updateSpeed(speed: number)
-	local lbl = self._speedLabel :: TextLabel?
-	if lbl then
-		lbl.Text = "Speed: " .. fmt(speed)
+local function spawnValchangePopup(ctx: any, parentLabel: TextLabel, template: TextLabel, delta: number)
+	local clone = template:Clone()
+	clone.Visible = true
+
+	-- Set text: "+5" or "-50"
+	if delta >= 0 then
+		(clone :: TextLabel).Text = "+" .. tostring(math.floor(delta))
+	else
+		(clone :: TextLabel).Text = tostring(math.floor(delta))
 	end
+
+	-- Start at template's original position
+	local origin = clone.Position
+	clone.TextTransparency = 0
+
+	-- Reset stroke transparency if it has a UIStroke
+	local stroke = clone:FindFirstChildOfClass("UIStroke")
+	if stroke then stroke.Transparency = 0 end
+
+	-- Start UIScale at 0 for pop-in effect
+	local uiScale = clone:FindFirstChildOfClass("UIScale")
+	if uiScale then
+		(uiScale :: UIScale).Scale = 0
+	end
+
+	clone.Parent = parentLabel
+
+	-- Pop scale 0 → 1 with Back overshoot
+	if uiScale then
+		local popInfo = TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+		TweenService:Create(uiScale :: Instance, popInfo, { Scale = 1 }):Play()
+	end
+
+	-- Tween upward + fade out
+	local targetPos = origin + UDim2.new(0, 0, 0, -POPUP_RISE_PX)
+	ctx.UI.Tween:Play(clone, { Position = targetPos, TextTransparency = 1 }, POPUP_DURATION)
+	if stroke then
+		ctx.UI.Tween:Play(stroke, { Transparency = 1 }, POPUP_DURATION)
+	end
+
+	-- Cleanup after tween
+	task.delay(POPUP_DURATION + 0.1, function()
+		clone:Destroy()
+	end)
 end
 
--- ── Refresh (Cash / XP / Level) ──────────────────────────────────────────────
+-- ── Refresh (Cash / XP / Level / Speed / Armor) ─────────────────────────────
 function HUDModule:_refresh(state: any)
 	if not self._hud then return end
 	local ctx = self._ctx
@@ -307,6 +348,40 @@ function HUDModule:_refresh(state: any)
 		local ratio = (xpNeeded > 0) and math.clamp(xp / xpNeeded, 0, 1) or 0
 		ctx.UI.Tween:Play(xpBar, { Size = UDim2.new(ratio, 0, 1, 0) }, 0.3)
 	end
+
+	-- ── Speed (from state) ───────────────────────────────────────────────────
+	local speedBoost = tonumber(progression.SpeedBoost) or 0
+	local totalSpeed = math.floor(BASE_WALK_SPEED + speedBoost)
+	local speedLbl = self._speedLabel :: TextLabel?
+	if speedLbl then
+		speedLbl.Text = "Speed: " .. tostring(totalSpeed)
+	end
+
+	-- Speed valchange popup
+	if self._prevSpeed ~= nil and self._speedValchange and speedLbl then
+		local speedDelta = totalSpeed - self._prevSpeed
+		if speedDelta ~= 0 then
+			spawnValchangePopup(ctx, speedLbl :: TextLabel, self._speedValchange :: TextLabel, speedDelta)
+		end
+	end
+	self._prevSpeed = totalSpeed
+
+	-- ── Armor ────────────────────────────────────────────────────────────────
+	local defense  = (type(state) == "table" and state.Defense) or {}
+	local curArmor = tonumber(defense.Armor) or 0
+	local armorLbl = self._armorLabel :: TextLabel?
+	if armorLbl then
+		armorLbl.Text = "Armor: " .. tostring(math.floor(curArmor))
+	end
+
+	-- Armor valchange popup
+	if self._prevArmor ~= nil and self._armorValchange and armorLbl then
+		local armorDelta = curArmor - self._prevArmor
+		if math.abs(armorDelta) >= 1 then
+			spawnValchangePopup(ctx, armorLbl :: TextLabel, self._armorValchange :: TextLabel, armorDelta)
+		end
+	end
+	self._prevArmor = curArmor
 end
 
 -- Derive XP needed for next level from ProgressionConfig or a simple formula.
