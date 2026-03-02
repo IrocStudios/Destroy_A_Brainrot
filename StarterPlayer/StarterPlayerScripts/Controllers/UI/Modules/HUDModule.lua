@@ -26,6 +26,7 @@
 --     └─ ...
 
 local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local HUDModule = {}
@@ -206,6 +207,20 @@ function HUDModule:Init(ctx: any)
 	-- No manual wiring here to avoid double-toggle.
 	print("[HUDController] - Nav buttons handled by Frames:BindButtons()")
 
+	-- Gift button countdown label (LeftButtons > Gifts > Frame > Title)
+	local leftButtons = self._hud:FindFirstChild("LeftButtons")
+	if leftButtons then
+		local giftBtn = leftButtons:FindFirstChild("Gifts", true)
+		if giftBtn then
+			local giftFrame = giftBtn:FindFirstChild("Frame")
+			if giftFrame then
+				self._giftTitle = giftFrame:FindFirstChild("Title") :: TextLabel?
+				self._giftTitleDefault = self._giftTitle and (self._giftTitle :: TextLabel).Text or "Gift"
+			end
+		end
+	end
+	print("[HUDController] - GiftTitle: " .. tostring(self._giftTitle ~= nil))
+
 	-- Initial state refresh (speed is read from state, not player attribute)
 	local initState = ctx.State and ctx.State.State or {}
 	print("[HUDController] - Initial state keys: " .. tostring(initState.Currency ~= nil and "Currency " or "") .. tostring(initState.Progression ~= nil and "Progression " or ""))
@@ -228,6 +243,17 @@ function HUDModule:Start()
 		self:_refresh(state)
 	end))
 	print("[HUDController] - Subscribed to State.Changed")
+
+	-- Gift button countdown: tick every 1 second for accurate timer
+	local giftTickAccum = 0
+	self._janitor:Add(RunService.Heartbeat:Connect(function(dt: number)
+		giftTickAccum += dt
+		if giftTickAccum >= 1 then
+			giftTickAccum = 0
+			self:_refreshGiftButton()
+		end
+	end))
+	print("[HUDController] - Gift button Heartbeat timer started")
 
 	print("[HUDController] - Start complete")
 end
@@ -382,6 +408,68 @@ function HUDModule:_refresh(state: any)
 		end
 	end
 	self._prevArmor = curArmor
+
+	-- ── Gift Button Countdown (also ticked by Heartbeat every 1s) ──
+	self:_refreshGiftButton()
+end
+
+-- ── Gift Button Countdown ───────────────────────────────────────────────────
+-- Called from _refresh (on state change) AND from Heartbeat (every 1s) so the
+-- HUD countdown always shows an accurate timer, not just every 10s sync.
+function HUDModule:_refreshGiftButton()
+	if not self._giftTitle then return end
+	local ctx = self._ctx
+	local state = ctx.State and ctx.State.State or {}
+	local rewards = (type(state) == "table" and state.Rewards) or {}
+	local pg = rewards.PlaytimeGifts
+	if not pg or type(pg) ~= "table" then return end
+
+	local ptConfig = ctx.Config and ctx.Config.PlaytimeGiftConfig
+	if not ptConfig or not ptConfig.Slots then return end
+
+	local todaySeconds = tonumber(pg.TodaySeconds) or 0
+	local syncedAt = tonumber(pg.SyncedAt) or os.time()
+	local devMult = tonumber(ptConfig.DEV_TIME_MULTIPLIER) or 1
+	local elapsed = (os.time() - syncedAt) * devMult
+	local liveSeconds = todaySeconds + elapsed
+
+	local claimed = pg.Claimed or {}
+	local nextUnclaimedTime: number? = nil
+	local anyReady = false
+	local allClaimed = true
+
+	for i = 1, (ptConfig.SlotCount or 9) do
+		local slot = ptConfig.Slots[i]
+		if slot and not claimed[tostring(i)] then
+			allClaimed = false
+			local remaining = slot.time - liveSeconds
+			if remaining <= 0 then
+				anyReady = true
+				break
+			else
+				if not nextUnclaimedTime or remaining < nextUnclaimedTime then
+					nextUnclaimedTime = remaining
+				end
+			end
+		end
+	end
+
+	local gTitle = self._giftTitle :: TextLabel
+	local gShadow = gTitle:FindFirstChild("Title") :: TextLabel?
+	local text: string
+	if anyReady then
+		text = "Ready!"
+	elseif allClaimed then
+		text = self._giftTitleDefault or "Gift"
+	elseif nextUnclaimedTime then
+		local mins = math.floor(nextUnclaimedTime / 60)
+		local secs = math.floor(nextUnclaimedTime % 60)
+		text = ("%d:%02d"):format(mins, secs)
+	else
+		text = self._giftTitleDefault or "Gift"
+	end
+	gTitle.Text = text
+	if gShadow then gShadow.Text = text end
 end
 
 -- Derive XP needed for next level from ProgressionConfig or a simple formula.

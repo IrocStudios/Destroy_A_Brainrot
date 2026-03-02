@@ -50,6 +50,7 @@ end
 ----------------------------------------------------------------------
 local LootTable = nil
 local GiftConfig = nil
+local PlaytimeGiftConfig = nil
 local RewardGranter = nil
 
 ----------------------------------------------------------------------
@@ -71,6 +72,7 @@ function RewardService:Init(services)
 
 	LootTable = require(SharedUtil:WaitForChild("LootTable"))
 	GiftConfig = require(SharedConfig:WaitForChild("GiftConfig"))
+	PlaytimeGiftConfig = require(SharedConfig:WaitForChild("PlaytimeGiftConfig"))
 	RewardGranter = require(ServerStorage:WaitForChild("Services"):WaitForChild("RewardGranter"))
 	RewardGranter.Setup(services)
 
@@ -131,22 +133,64 @@ function RewardService:Start()
 		end)
 	end)
 
-	-- ── TEST: Give 3 Blue gifts 10 seconds after spawn ─────────────────
-	-- Remove this block once gift sources (daily, kill, etc.) are fully wired.
-	local function giveTestGifts(player)
-		task.delay(10, function()
-			if not player.Parent then return end
-			for i = 1, 3 do
-				-- First gift prompts, rest go silent to inventory
-				self:ReceiveGift(player, "Blue", "test", i > 1)
+	-- ── Initialize DAB_LastPlaytimeTick for accurate playtime tracking ──
+	-- DataService:SaveProfile sets this attribute, but its first call is
+	-- ~90 seconds after join. Without an early init the periodic sync
+	-- below computes pendingDelta = 0 (attribute is nil), sending
+	-- TodaySeconds ≈ 0 every 10 s and resetting client-side timers.
+	local function initPlaytimeTick(p)
+		if typeof(p:GetAttribute("DAB_LastPlaytimeTick")) ~= "number" then
+			p:SetAttribute("DAB_LastPlaytimeTick", now())
+		end
+	end
+	for _, p in ipairs(Players:GetPlayers()) do
+		initPlaytimeTick(p)
+	end
+	Players.PlayerAdded:Connect(initPlaytimeTick)
+
+	-- ── Periodic playtime gifts sync (every 10 seconds) ────────────────
+	-- Pushes live PlaytimeGifts delta to all connected clients so the
+	-- GiftsClaimModule can render smooth countdowns between save ticks.
+	task.spawn(function()
+		while true do
+			task.wait(10)
+			for _, player in ipairs(Players:GetPlayers()) do
+				pcall(function()
+					local profile = self:GetProfile(player)
+					if not profile then return end
+					local rewards = getRewardsTableFromProfile(profile)
+					if not rewards then return end
+					local pg = rewards.PlaytimeGifts
+					if type(pg) ~= "table" then return end
+
+					-- Compute live seconds (add elapsed since last save tick)
+					local tNow = now()
+					local devMult = PlaytimeGiftConfig.DEV_TIME_MULTIPLIER or 1
+					local lastTick = player:GetAttribute("DAB_LastPlaytimeTick")
+					local pendingDelta = 0
+					if typeof(lastTick) == "number" then
+						pendingDelta = math.max(0, tNow - lastTick) * devMult
+					end
+
+					local todayStr = os.date("!%Y-%m-%d", tNow)
+					local liveSeconds = tonumber(pg.TodaySeconds) or 0
+					if pg.Date == todayStr then
+						liveSeconds = liveSeconds + pendingDelta
+					else
+						liveSeconds = pendingDelta -- new day, only unsaved delta
+					end
+
+					self.NetService:QueueDelta(player, "PlaytimeGifts", {
+						Date = pg.Date or todayStr,
+						TodaySeconds = liveSeconds,
+						Claimed = pg.Claimed or {},
+						SyncedAt = tNow,
+					})
+					self.NetService:FlushDelta(player)
+				end)
 			end
-			print("[RewardService] TEST: Gave " .. player.Name .. " 3 Blue gifts")
-		end)
-	end
-	Players.PlayerAdded:Connect(giveTestGifts)
-	for _, player in ipairs(Players:GetPlayers()) do
-		giveTestGifts(player)
-	end
+		end
+	end)
 end
 
 ----------------------------------------------------------------------
@@ -170,6 +214,8 @@ function RewardService:HandleRewardAction(player, payload)
 		return self:KeepGift(player, payload.GiftId)
 	elseif action == "GetInventory" then
 		return self:GetGiftInventory(player)
+	elseif action == "ClaimPlaytimeGift" then
+		return self:ClaimPlaytimeGift(player, payload.Slot)
 	else
 		return { ok = false, error = "UnknownAction" }
 	end
@@ -449,6 +495,106 @@ function RewardService:ClaimGift(player, giftId)
 		giftId = giftId,
 		reward = picked,
 		state = result,
+	}
+end
+
+----------------------------------------------------------------------
+-- ClaimPlaytimeGift: claim a daily playtime gift slot
+----------------------------------------------------------------------
+function RewardService:ClaimPlaytimeGift(player, slot)
+	slot = tonumber(slot)
+	if not slot or slot < 1 or slot > PlaytimeGiftConfig.SlotCount then
+		return { ok = false, error = "BadSlot" }
+	end
+
+	local slotDef = PlaytimeGiftConfig.GetSlot(slot)
+	if not slotDef then
+		return { ok = false, error = "BadSlot" }
+	end
+
+	local t = now()
+	local todayStr = os.date("!%Y-%m-%d", t)
+	local slotKey = tostring(slot)
+	local claimResult = nil
+
+	pcall(function()
+		self.DataService:Update(player, function(data)
+			data.Rewards = data.Rewards or {}
+			data.Rewards.PlaytimeGifts = data.Rewards.PlaytimeGifts or {
+				Date = "", TodaySeconds = 0, Claimed = {},
+			}
+			local pg = data.Rewards.PlaytimeGifts
+
+			-- Date mismatch = new day, reset
+			if pg.Date ~= todayStr then
+				pg.Date = todayStr
+				pg.TodaySeconds = 0
+				pg.Claimed = {}
+			end
+
+			-- Already claimed?
+			if pg.Claimed[slotKey] then
+				claimResult = { ok = false, error = "AlreadyClaimed" }
+				return false, "AlreadyClaimed"
+			end
+
+			-- Add unsaved playtime delta for accurate check
+			local devMult = PlaytimeGiftConfig.DEV_TIME_MULTIPLIER or 1
+			local lastTick = player:GetAttribute("DAB_LastPlaytimeTick")
+			local pendingDelta = 0
+			if typeof(lastTick) == "number" then
+				pendingDelta = math.max(0, t - lastTick) * devMult
+			end
+			local liveSeconds = (tonumber(pg.TodaySeconds) or 0) + pendingDelta
+
+			-- Not enough time?
+			if liveSeconds < slotDef.time then
+				claimResult = { ok = false, error = "NotEnoughTime" }
+				return false, "NotEnoughTime"
+			end
+
+			pg.Claimed[slotKey] = true
+			claimResult = { ok = true, slot = slot, giftKey = slotDef.giftKey }
+			return true
+		end)
+	end)
+
+	if not claimResult or not claimResult.ok then
+		return claimResult or { ok = false, error = "UpdateFailed" }
+	end
+
+	-- Grant the gift via existing ReceiveGift pipeline (fires Open/Keep prompt)
+	self:ReceiveGift(player, claimResult.giftKey, "playtime", false)
+
+	-- Sync PlaytimeGifts state to client
+	if self.NetService then
+		local profile = self:GetProfile(player)
+		local rewards = getRewardsTableFromProfile(profile)
+		local pg = rewards and rewards.PlaytimeGifts
+		if pg then
+			-- Add unsaved delta for accurate client display
+			local devMult2 = PlaytimeGiftConfig.DEV_TIME_MULTIPLIER or 1
+			local lastTick = player:GetAttribute("DAB_LastPlaytimeTick")
+			local pendingDelta = 0
+			if typeof(lastTick) == "number" then
+				pendingDelta = math.max(0, now() - lastTick) * devMult2
+			end
+			local liveSeconds = (tonumber(pg.TodaySeconds) or 0) + pendingDelta
+
+			self.NetService:QueueDelta(player, "PlaytimeGifts", {
+				Date = pg.Date or todayStr,
+				TodaySeconds = liveSeconds,
+				Claimed = pg.Claimed or {},
+				SyncedAt = now(),
+			})
+			self.NetService:FlushDelta(player)
+		end
+	end
+
+	return {
+		ok = true,
+		slot = slot,
+		giftKey = claimResult.giftKey,
 	}
 end
 

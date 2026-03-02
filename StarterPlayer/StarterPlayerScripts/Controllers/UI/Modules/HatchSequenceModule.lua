@@ -101,6 +101,17 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 	end
 end
 
+-- ── Gift asset helper ───────────────────────────────────────────────────────
+
+local function getGiftAsset(giftKey: string): Folder?
+	local ok, result = pcall(function()
+		return ReplicatedStorage:FindFirstChild("ShopAssets")
+			and ReplicatedStorage.ShopAssets:FindFirstChild("Gifts")
+			and ReplicatedStorage.ShopAssets.Gifts:FindFirstChild(giftKey)
+	end)
+	return ok and result or nil
+end
+
 -- ── Lifecycle ───────────────────────────────────────────────────────────────
 
 function HatchSequenceModule:Init(ctx: any)
@@ -187,9 +198,29 @@ end
 function HatchSequenceModule:_runSequence(giftData, rewardResult)
 	self:_resetAll()
 
-	-- Set gift icon
-	if self._gift and giftData and giftData.icon and giftData.icon ~= "" then
-		(self._gift :: ImageLabel).Image = giftData.icon
+	-- Set gift icon — clone full Icon from ShopAssets.Gifts.[giftKey]
+	-- (supports multi-layer icons with child ImageLabels)
+	if self._gift and giftData and giftData.giftKey then
+		local gift = self._gift :: ImageLabel
+		-- Clear any previously cloned icon
+		for _, child in (gift :: Instance):GetChildren() do
+			if child.Name == "GiftIcon" then child:Destroy() end
+		end
+		gift.Image = ""
+
+		local asset = getGiftAsset(giftData.giftKey)
+		if asset then
+			local sourceIcon = asset:FindFirstChild("Icon")
+			if sourceIcon and sourceIcon:IsA("ImageLabel") then
+				local clone = sourceIcon:Clone()
+				clone.Name = "GiftIcon"
+				clone.Size = UDim2.new(1, 0, 1, 0)
+				clone.Position = UDim2.new(0.5, 0, 0.5, 0)
+				clone.AnchorPoint = Vector2.new(0.5, 0.5)
+				clone.BackgroundTransparency = 1
+				clone.Parent = gift
+			end
+		end
 	end
 
 	-- ─── Phase 1: Intro (holder drops in) ───────────────────────────────
@@ -363,6 +394,10 @@ function HatchSequenceModule:_resetAll()
 		g.Position = UDim2.new(0.5, 0, -1, 0)
 		g.Rotation = 0
 		g.Visible  = true
+		-- Clean up cloned gift icons
+		for _, child in (g :: Instance):GetChildren() do
+			if child.Name == "GiftIcon" then child:Destroy() end
+		end
 	end
 
 	-- Hide all templates
@@ -397,6 +432,10 @@ function HatchSequenceModule:_cleanup()
 		g.Position = UDim2.new(0.5, 0, -1, 0)
 		g.Rotation = 0
 		g.Visible  = true
+		-- Clean up cloned gift icons
+		for _, child in (g :: Instance):GetChildren() do
+			if child.Name == "GiftIcon" then child:Destroy() end
+		end
 	end
 
 	self._frame.Visible = false

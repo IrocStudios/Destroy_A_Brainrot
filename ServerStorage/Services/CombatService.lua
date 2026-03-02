@@ -60,6 +60,33 @@ function CombatService:HandleDamageBrainrot(player: Player, brainrotGuid: any, d
 	return self:DamageBrainrot(player, brainrotGuid, damageAmount)
 end
 
+----------------------------------------------------------------------
+-- HandleSelfDamage — explosion self-damage routed through armor
+----------------------------------------------------------------------
+function CombatService:HandleSelfDamage(player: Player, damage: any)
+	damage = math.max(0, math.floor(tonumber(damage) or 0))
+	if damage == 0 then return { ok = true, absorbed = 0, overflow = 0 } end
+
+	local char = player.Character
+	if not char then return { ok = false } end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return { ok = false } end
+
+	-- Route through ArmorService first
+	local armorSvc = self.Services and self.Services.ArmorService
+	if armorSvc then
+		local absorbed, overflow = armorSvc:DamageArmor(player, damage)
+		if overflow > 0 then
+			hum:TakeDamage(overflow)
+		end
+		return { ok = true, absorbed = absorbed, overflow = overflow }
+	else
+		-- Fallback: no armor service → direct health damage
+		hum:TakeDamage(damage)
+		return { ok = true, absorbed = 0, overflow = damage }
+	end
+end
+
 function CombatService:RegisterBrainrot(
 	brainrotGuid: string,
 	humanoid: Humanoid,

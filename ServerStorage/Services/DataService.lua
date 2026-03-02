@@ -166,7 +166,7 @@ end
 --////////////////////////////
 -- Profile schema
 --////////////////////////////
-local CURRENT_VERSION = 6
+local CURRENT_VERSION = 7
 
 local function MakeProfileTemplate()
 	return {
@@ -219,6 +219,13 @@ local function MakeProfileTemplate()
 			-- Pity tracking: per loot source, { misses = number }
 			-- Keys: "Gift_Common", "Gift_Rare", "Egg_Dragon", etc.
 			Pity = {},
+
+			-- Playtime gifts: daily timer-based gift claims
+			PlaytimeGifts = {
+				Date = "",          -- UTC date string "YYYY-MM-DD", empty = never played
+				TodaySeconds = 0,   -- accumulated playtime today
+				Claimed = {},       -- [slotIndex string] = true
+			},
 		},
 
 		Boosts = {
@@ -330,6 +337,19 @@ local function ApplyMigrations(data: any)
 				end
 				if data.Rewards.Pity == nil then
 					data.Rewards.Pity = {}
+				end
+			end
+		end
+
+		if nextV == 7 then
+			-- Playtime gifts: add PlaytimeGifts tracking table
+			if type(data.Rewards) == "table" then
+				if data.Rewards.PlaytimeGifts == nil then
+					data.Rewards.PlaytimeGifts = {
+						Date = "",
+						TodaySeconds = 0,
+						Claimed = {},
+					}
 				end
 			end
 		end
@@ -734,6 +754,29 @@ function DataService:SaveProfile(player: Player)
 
 	if type(data.Stats) == "table" then
 		data.Stats.TotalPlaytimeSeconds = (tonumber(data.Stats.TotalPlaytimeSeconds) or 0) + delta
+	end
+
+	-- Playtime gifts: accumulate today's seconds, reset on date change
+	if type(data.Rewards) == "table" then
+		local pg = data.Rewards.PlaytimeGifts
+		if type(pg) == "table" then
+			local todayStr = os.date("!%Y-%m-%d", tNow)
+			if pg.Date ~= todayStr then
+				pg.Date = todayStr
+				pg.TodaySeconds = 0
+				pg.Claimed = {}
+			end
+			-- Apply dev time multiplier (TEMPORARY: 10x for testing)
+			local ptMult = 1
+			local okPt, ptCfg = pcall(function()
+				local rs = game:GetService("ReplicatedStorage")
+				return require(rs:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("PlaytimeGiftConfig"))
+			end)
+			if okPt and type(ptCfg) == "table" and type(ptCfg.DEV_TIME_MULTIPLIER) == "number" then
+				ptMult = ptCfg.DEV_TIME_MULTIPLIER
+			end
+			pg.TodaySeconds = (tonumber(pg.TodaySeconds) or 0) + (delta * ptMult)
+		end
 	end
 
 	data.LastSaveAt = tNow

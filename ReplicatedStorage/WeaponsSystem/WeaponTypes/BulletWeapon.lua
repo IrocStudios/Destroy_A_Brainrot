@@ -77,10 +77,18 @@ local function getDamageRemoteFunction()
 	return RemoteService:GetFunction("DamageBrainrot")
 end
 
+local function getSelfDamageRemoteFunction()
+	local net = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Net")
+	local RemoteService = require(net:WaitForChild("RemoteService"))
+	return RemoteService:GetFunction("SelfDamage")
+end
+
 local DamageBrainrotRF = nil
+local SelfDamageRF = nil
 if not IsServer then
 	-- cache on client
 	DamageBrainrotRF = getDamageRemoteFunction()
+	SelfDamageRF = getSelfDamageRemoteFunction()
 end
 
 local BulletWeapon = {}
@@ -726,6 +734,80 @@ function BulletWeapon:applyDamage(hitInfo)
 	end
 end
 
+function BulletWeapon:_applyExplosionDamage(hitInfo)
+	-- AOE explosion: damages all brainrots in blast radius + the shooter (self-damage).
+	-- Does NOT damage other players.
+	if IsServer then return end
+	if self.player ~= Players.LocalPlayer then return end
+
+	local blastRadius = self:getConfigValue("BlastRadius", 8)
+	local hitPoint = hitInfo.p
+	if not hitPoint then return end
+
+	local damage = self:calculateDamage(hitInfo.d)
+	if damage <= 0 then return end
+
+	if not DamageBrainrotRF then
+		DamageBrainrotRF = getDamageRemoteFunction()
+	end
+
+	-- 1) Damage all brainrots within blast radius
+	local enemies = getEnemiesFolder()
+	if enemies then
+		local alreadyHit = {}
+		for _, desc in enemies:GetDescendants() do
+			if desc:IsA("BasePart") then
+				local dist = (desc.Position - hitPoint).Magnitude
+				if dist <= blastRadius then
+					local brainrotModel = getBrainrotModelFromHit(desc)
+					if brainrotModel and not alreadyHit[brainrotModel] then
+						alreadyHit[brainrotModel] = true
+						local brainrotId = brainrotModel:GetAttribute("BrainrotId")
+						if type(brainrotId) == "string" and brainrotId ~= "" then
+							local falloff = 1 - (dist / blastRadius) * 0.5
+							local aoeDmg = math.floor(damage * falloff)
+							if aoeDmg > 0 then
+								local ok, res = pcall(function()
+									return DamageBrainrotRF:InvokeServer(brainrotId, aoeDmg)
+								end)
+								if ok and type(res) == "table" and res.ok == true then
+									if self.weaponsSystem.gui then
+										local hum = getBrainrotHumanoid(brainrotModel)
+										if hum then
+											self.weaponsSystem.gui:OnHitOtherPlayer(aoeDmg, hum)
+										end
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- 2) Self-damage: route through server (armor absorbs first, overflow hits health)
+	local char = Players.LocalPlayer.Character
+	if char then
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local dist = (hrp.Position - hitPoint).Magnitude
+			if dist <= blastRadius then
+				local falloff = 1 - (dist / blastRadius) * 0.5
+				local selfDmg = math.floor(damage * falloff)
+				if selfDmg > 0 then
+					if not SelfDamageRF then
+						SelfDamageRF = getSelfDamageRemoteFunction()
+					end
+					pcall(function()
+						SelfDamageRF:InvokeServer(selfDmg)
+					end)
+				end
+			end
+		end
+	end
+end
+
 function BulletWeapon:onHit(hitInfo)
 	local hitPart = hitInfo.part
 	if not (hitPart and hitPart.Parent) then
@@ -744,13 +826,16 @@ function BulletWeapon:onHit(hitInfo)
 		hitInfo.h = hitPart
 	end
 
-	-- Only apply damage if it is a brainrot
-	if isBrainrot then
+	-- Check if this weapon explodes on impact (Bazooka, Grenade Launcher, etc.)
+	local explodeOnImpact = self:getConfigValue("ExplodeOnImpact", false)
+
+	if explodeOnImpact then
+		-- AOE explosion damage: hits brainrots + self only (no other players)
+		self:_applyExplosionDamage(hitInfo)
+	elseif isBrainrot then
+		-- Standard single-target: only apply damage if it is a brainrot
 		self:applyDamage(hitInfo)
 	end
-
-	-- IMPORTANT: disable any server-side explosion damage to players/parts
-	-- (Explosions are visual-only in simulateProjectile above)
 end
 
 function BulletWeapon:fire(origin, dir, charge)

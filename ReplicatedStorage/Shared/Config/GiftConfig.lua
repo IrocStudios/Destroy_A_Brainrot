@@ -46,6 +46,25 @@ GiftConfig.Gifts = {
 			{ weight = 5,  kind = "XP",        amount = 500,   tier = 3 },
 		},
 	},
+
+	--------------------------------------------------------------
+	-- GOLD  (rare-tier gift — scaled up from Purple)
+	--------------------------------------------------------------
+	Gold = {
+		pity = { threshold = 10, minTier = 4 },
+		loot = {
+			{ weight = 20, kind = "Cash",      amount = 2000,  tier = 1 },
+			{ weight = 15, kind = "XP",        amount = 250,   tier = 1 },
+			{ weight = 10, kind = "Cash",      amount = 8000,  tier = 2 },
+			{ weight = 12, kind = "Weapon",    weaponKey = "AK12",          dupeCashValue = 500, tier = 2 },
+			{ weight = 10, kind = "ArmorStep", steps = 3,      tier = 3 },
+			{ weight = 8,  kind = "SpeedStep", steps = 3,      tier = 3 },
+			{ weight = 10, kind = "Cash",      amount = 15000, tier = 3 },
+			{ weight = 8,  kind = "XP",        amount = 1000,  tier = 3 },
+			{ weight = 5,  kind = "Boost",     boostType = "CashMult", mult = 2,   duration = 600, tier = 4 },
+			{ weight = 2,  kind = "Boost",     boostType = "LuckMult", mult = 1.5, duration = 600, tier = 4 },
+		},
+	},
 }
 
 --------------------------------------------------------------

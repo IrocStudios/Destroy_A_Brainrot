@@ -321,12 +321,6 @@ function BuySpeedModule:_updateStandBillboard(standData: any)
 			local frame = desc:FindFirstChild("Frame")
 			if not frame then continue end
 
-			-- Title label (amount preview)
-			local titleLbl = frame:FindFirstChild("Title") :: TextLabel?
-			if titleLbl then
-				titleLbl.Text = isMaxed and "MAX Speed" or ("+" .. tostring(amount) .. " Speed")
-			end
-
 			-- Value label (price)
 			local valueLbl = frame:FindFirstChild("Value") :: TextLabel?
 			if valueLbl then

@@ -164,13 +164,26 @@ function OpenGiftModule:_showImmediate(giftObj: any)
 	local giftKey     = tostring(giftObj.giftKey or "Blue")
 	local displayName = tostring(giftObj.displayName or "Gift")
 
-	-- Load gift icon from ShopAssets.Gifts.[giftKey].Icon
+	-- Load gift icon — clone full Icon from ShopAssets.Gifts.[giftKey]
+	-- (supports multi-layer icons with child ImageLabels)
 	if self._giftImage then
+		-- Clear any previously cloned icon
+		for _, child in (self._giftImage :: Instance):GetChildren() do
+			if child.Name == "GiftIcon" then child:Destroy() end
+		end
+		(self._giftImage :: ImageLabel).Image = ""
+
 		local asset = getGiftAsset(giftKey)
 		if asset then
-			local icon = asset:FindFirstChild("Icon") :: ImageLabel?
-			if icon then
-				(self._giftImage :: ImageLabel).Image = (icon :: ImageLabel).Image
+			local sourceIcon = asset:FindFirstChild("Icon")
+			if sourceIcon and sourceIcon:IsA("ImageLabel") then
+				local clone = sourceIcon:Clone()
+				clone.Name = "GiftIcon"
+				clone.Size = UDim2.new(1, 0, 1, 0)
+				clone.Position = UDim2.new(0.5, 0, 0.5, 0)
+				clone.AnchorPoint = Vector2.new(0.5, 0.5)
+				clone.BackgroundTransparency = 1
+				clone.Parent = self._giftImage
 			end
 		end
 	end
@@ -212,6 +225,13 @@ function OpenGiftModule:_close()
 
 	self:_stopSway()
 
+	-- Clean up cloned gift icon
+	if self._giftImage then
+		for _, child in (self._giftImage :: Instance):GetChildren() do
+			if child.Name == "GiftIcon" then child:Destroy() end
+		end
+	end
+
 	-- Shrink out
 	if self._uiScale then
 		local info = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
@@ -249,16 +269,6 @@ function OpenGiftModule:_onOpen()
 	local giftId      = gift.id
 	local wasFromInventory = self._fromInventory
 
-	-- Get the icon image for the hatch sequence
-	local iconImage = ""
-	local asset = getGiftAsset(giftKey)
-	if asset then
-		local icon = asset:FindFirstChild("Icon") :: ImageLabel?
-		if icon then
-			iconImage = (icon :: ImageLabel).Image
-		end
-	end
-
 	-- Close the prompt (resets _fromInventory)
 	self:_close()
 
@@ -276,11 +286,10 @@ function OpenGiftModule:_onOpen()
 		})
 
 		if type(result) == "table" and result.ok then
-			-- Build gift data for hatch sequence
+			-- Build gift data for hatch sequence (icon cloned by HatchSequence via giftKey)
 			local giftData = {
 				giftKey     = giftKey,
 				displayName = displayName,
-				icon        = iconImage,
 			}
 
 			-- Build onComplete callback to reopen backpack if opened from inventory
@@ -329,6 +338,15 @@ function OpenGiftModule:_onKeep()
 
 	-- Close the prompt
 	self:_close()
+
+	-- Bump backpack notification if this is a newly received gift (not from inventory)
+	-- The gift is staying in inventory, so the player should see the +1 badge.
+	if not wasFromInventory then
+		local backpack = self._ctx.Backpack
+		if backpack and type(backpack._bumpNotification) == "function" then
+			backpack:_bumpNotification()
+		end
+	end
 
 	-- Tell server we're keeping it (gift stays in inventory)
 	task.spawn(function()

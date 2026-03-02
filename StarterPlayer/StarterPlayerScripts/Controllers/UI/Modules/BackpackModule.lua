@@ -25,6 +25,7 @@ BackpackModule.__index = BackpackModule
 
 -- ── Rarity gradient helper ──────────────────────────────────────────────────
 local _rarityGradients = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("RarityGradients")
+local _shopGradients = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("ShopGradients")
 
 local TEXTLABEL_DARKEN = 0.85 -- 15% darker on TextLabels
 
@@ -68,6 +69,36 @@ local function applyRarityGradients(parent: Instance, rarityName: string)
 					desc.Rotation = 90
 				else
 					CollectionService:RemoveTag(desc, "RainbowGradient")
+				end
+			end
+		end
+	end
+end
+
+-- ── Gift gradient helper (uses ShopGradients instead of RarityGradients) ─────
+local GIFT_GRADIENT_MAP = {
+	Blue   = "GiftBlue",
+	Purple = "GiftPurple",
+	Gold   = "GiftGold",
+}
+
+local function applyGiftGradients(parent: Instance, giftKey: string)
+	local gradientName = GIFT_GRADIENT_MAP[giftKey] or "GiftBlue"
+	for _, desc in parent:GetDescendants() do
+		if desc:IsA("UIGradient") then
+			if desc.Name == "RarityGradient" then
+				local source = _shopGradients:FindFirstChild(gradientName)
+				if source and source:IsA("UIGradient") then
+					local color = source.Color
+					if desc.Parent and desc.Parent:IsA("TextLabel") then
+						color = darkenColorSequence(color, TEXTLABEL_DARKEN)
+					end
+					desc.Color = color
+				end
+			elseif desc.Name == "RarityGradientStroke" then
+				local source = _shopGradients:FindFirstChild(gradientName .. "Stroke")
+				if source and source:IsA("UIGradient") then
+					desc.Color = source.Color
 				end
 			end
 		end
@@ -328,20 +359,31 @@ end
 function BackpackModule:_populateContainer()
 	self:_clearContainer()
 
-	local ownedSet = getOwnedSet(self._ctx)
 	local selectedSet = getSelectedSet(self._ctx)
 	local category = self._activeTab or "Normal"
 
-	local weaponList = self._weaponGrouped[category] or {}
+	-- Build list from raw owned weapons (preserves duplicates — each gets its own card)
+	local ownedList = getOwnedList(self._ctx)
+	local weaponsToShow = {}
+	for _, key in ipairs(ownedList) do
+		local data = self._weaponData[key]
+		if data and data.category == category then
+			table.insert(weaponsToShow, data)
+		end
+	end
+
+	-- Sort: rarity descending, then name ascending
+	table.sort(weaponsToShow, function(a, b)
+		if a.rarity ~= b.rarity then return a.rarity > b.rarity end
+		return a.displayName < b.displayName
+	end)
+
 	local holderTemplate = self._resources.Holder
 
 	local currentHolder: Frame? = nil
 	local countInRow = 0
 
-	for _, data in weaponList do
-		-- Only show weapons the player owns
-		if not ownedSet[data.key] then continue end
-
+	for _, data in weaponsToShow do
 		-- Need a new holder row?
 		if countInRow == 0 or countInRow >= ITEMS_PER_ROW then
 			currentHolder = holderTemplate:Clone()
@@ -431,36 +473,26 @@ function BackpackModule:_buildGiftCard(group: any): TextButton
 
 	local giftKey = group.giftKey
 	local asset = getGiftAsset(giftKey)
-	local displayName = giftKey
-	local iconImage = ""
-
-	if asset then
-		displayName = asset:GetAttribute("DisplayName") or giftKey
-		local iconLabel = asset:FindFirstChild("Icon")
-		if iconLabel and iconLabel:IsA("ImageLabel") then
-			iconImage = iconLabel.Image
-		end
-	end
 
 	local container = card:FindFirstChild("container")
 	if container then
-		-- Title + shadow
+		-- Title + shadow → all gifts just show "Gift"
 		local title = container:FindFirstChild("Title")
 		if title and title:IsA("TextLabel") then
-			title.Text = displayName
+			title.Text = "Gift"
 			local shadow = title:FindFirstChild("Title2")
 			if shadow and shadow:IsA("TextLabel") then
-				shadow.Text = displayName
+				shadow.Text = "Gift"
 			end
 		end
 
-		-- Rarity label → show "Gift"
+		-- Hide rarity label entirely for gifts
 		local rarLabel = container:FindFirstChild("Rarity")
 		if rarLabel and rarLabel:IsA("TextLabel") then
-			rarLabel.Text = "Gift"
+			rarLabel.Visible = false
 			local shadow = rarLabel:FindFirstChild("Rarity2")
 			if shadow and shadow:IsA("TextLabel") then
-				shadow.Text = "Gift"
+				shadow.Visible = false
 			end
 		end
 
@@ -479,20 +511,25 @@ function BackpackModule:_buildGiftCard(group: any): TextButton
 			end
 		end
 
-		-- Gift icon in IconHolder
+		-- Gift icon in IconHolder — clone full Icon from asset
+		-- (supports multi-layer icons with child ImageLabels)
 		local iconHolder = container:FindFirstChild("IconHolder")
-		if iconHolder then
-			local img = iconHolder:FindFirstChild("x")
-			if img and img:IsA("ImageLabel") then
-				img.Image = iconImage
-				img.Visible = true
+		if iconHolder and asset then
+			local sourceIcon = asset:FindFirstChild("Icon")
+			if sourceIcon and sourceIcon:IsA("ImageLabel") then
+				local placeholder = iconHolder:FindFirstChild("x")
+				local clone = sourceIcon:Clone()
+				if placeholder then
+					clone.Size = placeholder.Size
+					clone.Position = placeholder.Position
+					clone.AnchorPoint = placeholder.AnchorPoint
+					clone.ZIndex = placeholder.ZIndex
+					clone.BackgroundTransparency = 1
+					placeholder:Destroy()
+				end
+				clone.Name = "GiftIcon"
+				clone.Parent = iconHolder
 			end
-		end
-
-		-- Stud background image
-		local stud = container:FindFirstChild("Stud")
-		if stud and stud:IsA("ImageLabel") then
-			stud.Image = iconImage
 		end
 
 		-- Hide "New!" label
@@ -507,8 +544,8 @@ function BackpackModule:_buildGiftCard(group: any): TextButton
 			selected.Visible = false
 		end
 
-		-- Apply rarity gradients using "Common" style (gifts don't have weapon rarity)
-		applyRarityGradients(container, "Common")
+		-- Apply gift-specific gradients from ShopGradients (Blue/Purple/Gold)
+		applyGiftGradients(container, giftKey)
 	end
 
 	-- Click handler: open the gift prompt via OpenGiftModule
@@ -776,27 +813,41 @@ end
 function BackpackModule:Start()
 	if not self._frame then return end
 
-	-- Track previous owned set to detect new weapons
-	local prevOwned = getOwnedSet(self._ctx)
+	-- Track previous weapon counts (preserves duplicates) for new-weapon detection + notification
+	local prevWeaponCounts: { [string]: number } = {}
+	do
+		local list = getOwnedList(self._ctx)
+		for _, k in ipairs(list) do
+			prevWeaponCounts[k] = (prevWeaponCounts[k] or 0) + 1
+		end
+	end
 
 	self._janitor:Add(self._ctx.State.Changed:Connect(function(_state, _deltas)
-		-- Check for new weapons (for "New!" labels only)
-		local newOwned = getOwnedSet(self._ctx)
-		for key in pairs(newOwned) do
-			if not prevOwned[key] then
+		-- Detect new weapons (including duplicates) and bump notification
+		local newCounts: { [string]: number } = {}
+		local newList = getOwnedList(self._ctx)
+		for _, k in ipairs(newList) do
+			newCounts[k] = (newCounts[k] or 0) + 1
+		end
+		for key, count in pairs(newCounts) do
+			local prev = prevWeaponCounts[key] or 0
+			if count > prev then
 				self._newKeys[key] = true
+				for _ = 1, count - prev do
+					self:_bumpNotification()
+				end
 			end
 		end
-		prevOwned = newOwned
+		prevWeaponCounts = newCounts
 
-		-- Rebuild current tab (handles both ownership and selection changes)
+		-- Rebuild current tab (handles ownership, selection, and gift changes)
 		self:_populateContainer()
 	end))
 
-	-- Bump notification badge on every purchase (new or not)
+	-- Gift drop notification: kill drops only (prompt gifts handled by OpenGiftModule._onKeep)
 	local notifyRE = self._ctx.Net:GetEvent("Notify")
 	self._janitor:Add(notifyRE.OnClientEvent:Connect(function(payload)
-		if type(payload) == "table" and payload.type == "purchased" then
+		if type(payload) == "table" and payload.Title == "Gift Drop!" then
 			self:_bumpNotification()
 		end
 	end))

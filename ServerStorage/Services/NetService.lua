@@ -88,6 +88,7 @@ function NetService:Init(services)
 	self._rfCommand  = self.RemoteService:GetFunction("CommandAction")
 	self._rfDeath    = self.RemoteService:GetFunction("DeathAction")
 	self._rfGift     = self.RemoteService:GetFunction("GiftAction")
+	self._rfSelfDmg  = self.RemoteService:GetFunction("SelfDamage")
 
 	self._pending = {}
 end
@@ -147,6 +148,10 @@ function NetService:Start()
 
 	self._rfGift.OnServerInvoke = function(player, payload)
 		return self:RouteAction("GiftService", "HandleGiftAction", player, payload)
+	end
+
+	self._rfSelfDmg.OnServerInvoke = function(player, damage)
+		return self:RouteAction("CombatService", "HandleSelfDamage", player, damage)
 	end
 
 	local DataService = self.Services.DataService

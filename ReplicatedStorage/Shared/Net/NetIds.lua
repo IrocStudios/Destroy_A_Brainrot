@@ -72,6 +72,9 @@ NetIds.Encode = {
 
 	-- Gift inventory (array of gift objects synced on change)
 	GiftInventory = 33,
+
+	-- Playtime gifts (daily playtime tracking)
+	PlaytimeGifts = 90,
 }
 
 NetIds.Decode = {}

@@ -121,6 +121,9 @@ function StateController:ApplyDelta(deltaList)
 		elseif key == "SpeedStep" then
 			self.State.Progression = self.State.Progression or {}
 			self.State.Progression.SpeedStep = d.v
+		elseif key == "PlaytimeGifts" then
+			self.State.Rewards = self.State.Rewards or {}
+			self.State.Rewards.PlaytimeGifts = d.v
 		end
 	end
 	self.Changed:Fire(self.State, deltaList)
