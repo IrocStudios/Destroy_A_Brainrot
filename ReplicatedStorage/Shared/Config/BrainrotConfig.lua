@@ -30,6 +30,29 @@ local BrainrotConfig = {
 	},
 
 
+	["Noobini_Pizzanini"] = {
+		DisplayName = "Noobini Pizzanini",
+
+		-- Baseline stats
+		Health = 100,
+		Walkspeed = 5,
+		Runspeed = 14,
+
+		-- Optional movement/combat fields (stored in EnemyInfo; AI will use if present)
+		Attackspeed = 20,
+		HealRate = 0,
+
+		AttackDamage = 10,
+		AttackRange = 6,
+		AttackCooldown = 1.5,
+
+		-- Economy baseline (CombatService applies rarity multipliers on payout)
+		Price = 50,
+
+		-- Rarity + personality
+		RarityName = "Common",
+		Personality = "Passive",
+	},
 
 	["Garamararam"] = {
 		DisplayName = "Garamararam",
