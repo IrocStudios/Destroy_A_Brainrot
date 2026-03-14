@@ -16,6 +16,7 @@ local function getAttackFXRemote(): RemoteEvent?
 	local net = ReplicatedStorage:FindFirstChild("Shared")
 		and ReplicatedStorage.Shared:FindFirstChild("Net")
 		and ReplicatedStorage.Shared.Net:FindFirstChild("Remotes")
+		and ReplicatedStorage.Shared.Net.Remotes:FindFirstChild("RemoteEvents")
 	if not net then return nil end
 	local re = net:FindFirstChild("BrainrotAttackFX")
 	return (re and re:IsA("RemoteEvent")) and re :: RemoteEvent or nil
@@ -70,13 +71,13 @@ function GunStyle:Execute(entry: any, target: any, services: any, moveConfig: an
 		local origin = hrp.Position + Vector3.new(0, 1.5, 0)
 		local targetPos = targetHRP.Position
 
-		-- Add slight spread
-		local spread = Vector3.new(
-			(math.random() - 0.5) * 2,
-			(math.random() - 0.5) * 1,
-			(math.random() - 0.5) * 2
+		-- Add configurable spread
+		local spreadAmt = (moveConfig and moveConfig.Spread) or 1
+		targetPos = targetPos + Vector3.new(
+			(math.random() - 0.5) * 2 * spreadAmt,
+			(math.random() - 0.5) * spreadAmt * 0.5,
+			(math.random() - 0.5) * 2 * spreadAmt
 		)
-		targetPos = targetPos + spread
 
 		-- Fire FX per bullet
 		if fxRemote then

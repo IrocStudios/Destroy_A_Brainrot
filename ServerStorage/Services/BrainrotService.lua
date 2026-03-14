@@ -366,6 +366,21 @@ local function randomPointInTerritory(territory: BasePart): Vector3
 	return Vector3.new(p.X, territory.Position.Y, p.Z)
 end
 
+local Players = game:GetService("Players")
+
+local function getMinPlayerDistance(pos: Vector3): number
+	local minDist = math.huge
+	for _, player in ipairs(Players:GetPlayers()) do
+		local char = player.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp and hrp:IsA("BasePart") then
+			local d = (hrp.Position - pos).Magnitude
+			if d < minDist then minDist = d end
+		end
+	end
+	return minDist
+end
+
 local function findSafeSpawnPoint(territory: BasePart, tries: number, boxSize: Vector3?): Vector3
 	local checkSize = boxSize or Vector3.new(6, 10, 6)
 
@@ -378,8 +393,6 @@ local function findSafeSpawnPoint(territory: BasePart, tries: number, boxSize: V
 	if enemiesFolder then
 		table.insert(excludeList, enemiesFolder)
 	end
-	-- Exclusion zone parts should not block the overlap check (they're non-collidable
-	-- invisible volumes), but we reject points inside them separately below.
 
 	local params = OverlapParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
@@ -388,6 +401,9 @@ local function findSafeSpawnPoint(territory: BasePart, tries: number, boxSize: V
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 	rayParams.FilterDescendantsInstances = excludeList
+
+	-- Collect valid candidate positions, scored by distance from players
+	local candidates: { { pos: Vector3, dist: number } } = {}
 
 	for attempt = 1, tries do
 		local p = randomPointInTerritory(territory)
@@ -415,8 +431,15 @@ local function findSafeSpawnPoint(territory: BasePart, tries: number, boxSize: V
 			end
 		end
 		if not blocked then
-			return p
+			table.insert(candidates, { pos = p, dist = getMinPlayerDistance(p) })
 		end
+	end
+
+	-- Pick from candidates: prefer positions far from players (top 3, with randomness)
+	if #candidates > 0 then
+		table.sort(candidates, function(a, b) return a.dist > b.dist end)
+		local pick = candidates[math.random(1, math.min(3, #candidates))]
+		return pick.pos
 	end
 
 	-- Fallback: try territory edge points instead of center
@@ -578,41 +601,47 @@ function BrainrotService:_countOccupants(zoneRt: ZoneRuntime): number
 end
 
 function BrainrotService:_applyBaseline(model: Model, brainrotName: string): (number, number, string)
-	-- Read stats from the Info Configuration inside ReplicatedStorage.Brainrots[name]
-	local entry = readInfoConfig(brainrotName)
+	-- BrainrotConfig.lua is the primary source of truth (code-managed, version-controlled).
+	-- Studio-side Info Configuration is a fallback for brainrots not yet in config.
+	local infoEntry = readInfoConfig(brainrotName)
+	local cfgEntry = getBrainrotConfig()[brainrotName] or getBrainrotConfig()["Default"] or {}
 
 	local hum, _ = getHumanoidAndHRP(model)
 	local enemyInfo = ensureEnemyInfo(model)
 
-	local displayName = entry.DisplayName or brainrotName
+	local displayName = cfgEntry.DisplayName or infoEntry.DisplayName or brainrotName
 
-	-- Rarity: Info stores as number (1-6). Convert to name.
-	local rarityNum = tonumber(entry.Rarity) or 1
+	-- Rarity: BrainrotConfig stores RarityName string. Info stores numeric Rarity (1-6).
+	local rarityNum = tonumber(infoEntry.Rarity) or 1
 	local rarityName = "Common"
-	if type(entry.RarityName) == "string" and entry.RarityName ~= "" then
-		rarityName = entry.RarityName
-	elseif type(entry.Rarity) == "number" then
-		rarityName = rarityNameFromNumber(entry.Rarity)
+	if type(cfgEntry.RarityName) == "string" and cfgEntry.RarityName ~= "" then
+		rarityName = cfgEntry.RarityName
+	elseif type(infoEntry.RarityName) == "string" and infoEntry.RarityName ~= "" then
+		rarityName = infoEntry.RarityName
+	elseif type(infoEntry.Rarity) == "number" then
+		rarityName = rarityNameFromNumber(infoEntry.Rarity)
 	end
 
-	local price = tonumber(entry.Price) or 0
+	local price = cfgEntry.Price or tonumber(infoEntry.Price) or 0
 
-	-- Health: read from the Body template Humanoid, fall back to Info or 100
-	local maxHealth = tonumber(entry.Health) or 100
-	local bodyTemplate = getBodyTemplate(brainrotName)
-	if bodyTemplate then
-		local bodyHum = bodyTemplate:FindFirstChildOfClass("Humanoid")
-		if bodyHum and bodyHum.MaxHealth > 0 then
-			maxHealth = bodyHum.MaxHealth
+	-- Health: BrainrotConfig > Body template Humanoid > Info > 100
+	local maxHealth = cfgEntry.Health or tonumber(infoEntry.Health) or 100
+	if not cfgEntry.Health then
+		local bodyTemplate = getBodyTemplate(brainrotName)
+		if bodyTemplate then
+			local bodyHum = bodyTemplate:FindFirstChildOfClass("Humanoid")
+			if bodyHum and bodyHum.MaxHealth > 0 then
+				maxHealth = bodyHum.MaxHealth
+			end
 		end
 	end
 
-	local walk = tonumber(entry.Walkspeed) or 16
-	local run = tonumber(entry.Runspeed) or (walk + 6)
-	local atkSpeed = tonumber(entry.Attackspeed) or 20
-	local healRate = tonumber(entry.HealRate) or 0
+	local walk = cfgEntry.Walkspeed or tonumber(infoEntry.Walkspeed) or 16
+	local run = cfgEntry.Runspeed or tonumber(infoEntry.Runspeed) or (walk + 6)
+	local atkSpeed = cfgEntry.Attackspeed or tonumber(infoEntry.Attackspeed) or 20
+	local healRate = cfgEntry.HealRate or tonumber(infoEntry.HealRate) or 0
 
-	local personality = entry.Personality
+	local personality = cfgEntry.Personality or infoEntry.Personality
 	if type(personality) ~= "string" or personality == "" then
 		personality = "Passive"
 	end
@@ -631,9 +660,12 @@ function BrainrotService:_applyBaseline(model: Model, brainrotName: string): (nu
 	enemyInfo:SetAttribute("HealRate", healRate)
 	enemyInfo:SetAttribute("Personality", personality)
 
-	if entry.AttackDamage ~= nil then enemyInfo:SetAttribute("AttackDamage", entry.AttackDamage) end
-	if entry.AttackRange ~= nil then enemyInfo:SetAttribute("AttackRange", entry.AttackRange) end
-	if entry.AttackCooldown ~= nil then enemyInfo:SetAttribute("AttackCooldown", entry.AttackCooldown) end
+	local atkDmg = cfgEntry.AttackDamage or infoEntry.AttackDamage
+	local atkRange = cfgEntry.AttackRange or infoEntry.AttackRange
+	local atkCd = cfgEntry.AttackCooldown or infoEntry.AttackCooldown
+	if atkDmg ~= nil then enemyInfo:SetAttribute("AttackDamage", atkDmg) end
+	if atkRange ~= nil then enemyInfo:SetAttribute("AttackRange", atkRange) end
+	if atkCd ~= nil then enemyInfo:SetAttribute("AttackCooldown", atkCd) end
 
 	local totalValue = price
 	if totalValue <= 0 then

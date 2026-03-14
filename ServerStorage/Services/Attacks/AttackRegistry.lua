@@ -11,6 +11,7 @@ local AttackRegistry = {}
 
 local _modules: { [string]: any } = {}
 local _attackConfig: any = nil
+local _brainrotConfig: any = nil
 local _loaded = false
 
 local DEBUG = false
@@ -102,10 +103,42 @@ function AttackRegistry:GetModule(name: string): any?
 	return _modules[name]
 end
 
+local function getBrainrotConfig(): any
+	if _brainrotConfig then return _brainrotConfig end
+	local shared = ReplicatedStorage:WaitForChild("Shared")
+	local cfg = shared:WaitForChild("Config")
+	local ok, mod = pcall(function()
+		return require(cfg:WaitForChild("BrainrotConfig"))
+	end)
+	if ok and type(mod) == "table" then
+		_brainrotConfig = mod
+		return mod
+	end
+	_brainrotConfig = {}
+	return _brainrotConfig
+end
+
 --- Get the config for a move from AttackConfig.Moves.
 function AttackRegistry:GetMoveConfig(moveName: string): any?
 	local cfg = getAttackConfig()
 	return cfg.Moves and cfg.Moves[moveName]
+end
+
+--- Get the config for a move with per-brainrot MoveOverrides merged in.
+function AttackRegistry:GetMoveConfigForBrainrot(moveName: string, brainrotName: string): any?
+	local baseCfg = self:GetMoveConfig(moveName)
+	if not baseCfg then return nil end
+
+	local bCfg = getBrainrotConfig()
+	local entry = bCfg[brainrotName]
+	if not entry or type(entry.MoveOverrides) ~= "table" then return baseCfg end
+	local overrides = entry.MoveOverrides[moveName]
+	if type(overrides) ~= "table" then return baseCfg end
+
+	local merged = {}
+	for k, v in pairs(baseCfg) do merged[k] = v end
+	for k, v in pairs(overrides) do merged[k] = v end
+	return merged
 end
 
 --- Get projectile config by skin name.
@@ -168,13 +201,15 @@ function AttackRegistry:PickMove(
 ): (string?, any?, any?)
 	if #availableMoves == 0 then return nil, nil, nil end
 
+	local brainrotName = entry.Model and tostring(entry.Model:GetAttribute("BrainrotName") or "Default") or "Default"
+
 	-- Gather valid candidates (off cooldown + in range + CanExecute)
 	local meleeCandidates: { { name: string, mod: any, cfg: any, weight: string } } = {}
 	local rangedCandidates: { { name: string, mod: any, cfg: any, weight: string } } = {}
 
 	for _, moveName in ipairs(availableMoves) do
 		local mod = _modules[moveName]
-		local cfg = self:GetMoveConfig(moveName)
+		local cfg = self:GetMoveConfigForBrainrot(moveName, brainrotName)
 		if not mod or not cfg then continue end
 
 		-- Check cooldown
@@ -184,9 +219,9 @@ function AttackRegistry:PickMove(
 		local range = cfg.Range or 6
 		if dist > range * 1.2 then continue end -- allow slight overshoot
 
-		-- Check module-level CanExecute if it exists
+		-- Check module-level CanExecute if it exists (pass cfg for MinRange etc.)
 		if type(mod.CanExecute) == "function" then
-			local canExec = mod:CanExecute(entry, target, dist)
+			local canExec = mod:CanExecute(entry, target, dist, cfg)
 			if not canExec then continue end
 		end
 
@@ -257,10 +292,11 @@ end
 
 --- Get the maximum effective range across all available moves for this brainrot.
 --- Used by AIService to determine when to stop chasing and start attacking.
-function AttackRegistry:GetMaxRange(availableMoves: { string }): number
+function AttackRegistry:GetMaxRange(availableMoves: { string }, brainrotName: string?): number
+	local bName = brainrotName or "Default"
 	local maxRange = 6
 	for _, moveName in ipairs(availableMoves) do
-		local cfg = self:GetMoveConfig(moveName)
+		local cfg = self:GetMoveConfigForBrainrot(moveName, bName)
 		if cfg and cfg.Range and cfg.Range > maxRange then
 			maxRange = cfg.Range
 		end
@@ -269,10 +305,11 @@ function AttackRegistry:GetMaxRange(availableMoves: { string }): number
 end
 
 --- Get the minimum range (for positioning — don't get closer than melee range if you have ranged).
-function AttackRegistry:GetMinRange(availableMoves: { string }): number
+function AttackRegistry:GetMinRange(availableMoves: { string }, brainrotName: string?): number
+	local bName = brainrotName or "Default"
 	local minRange = 999
 	for _, moveName in ipairs(availableMoves) do
-		local cfg = self:GetMoveConfig(moveName)
+		local cfg = self:GetMoveConfigForBrainrot(moveName, bName)
 		if cfg and cfg.Range and cfg.Range < minRange then
 			minRange = cfg.Range
 		end

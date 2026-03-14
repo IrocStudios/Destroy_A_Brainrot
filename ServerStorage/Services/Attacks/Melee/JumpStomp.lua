@@ -16,6 +16,7 @@ local function getAttackFXRemote(): RemoteEvent?
 	local net = ReplicatedStorage:FindFirstChild("Shared")
 		and ReplicatedStorage.Shared:FindFirstChild("Net")
 		and ReplicatedStorage.Shared.Net:FindFirstChild("Remotes")
+		and ReplicatedStorage.Shared.Net.Remotes:FindFirstChild("RemoteEvents")
 	if not net then return nil end
 	local re = net:FindFirstChild("BrainrotAttackFX")
 	return (re and re:IsA("RemoteEvent")) and re :: RemoteEvent or nil

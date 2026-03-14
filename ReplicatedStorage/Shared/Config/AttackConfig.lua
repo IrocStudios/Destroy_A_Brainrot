@@ -9,36 +9,101 @@ local AttackConfig = {
 	-- Projectile skins
 	-- Key = skin name referenced by moves. Asset = ReplicatedStorage.Assets.Projectiles child name.
 	----------------------------------------------------------------------
+	----------------------------------------------------------------------
+	-- Projectile skins
+	-- Key = skin name referenced by moves. Asset = ReplicatedStorage.Assets.Projectiles child name.
+	--
+	-- Fields:
+	--   Asset: string          — child name under Assets.Projectiles
+	--   Speed: number          — studs per second travel speed
+	--   MaxRange: number?      — max distance the projectile can travel (nil = unlimited)
+	--   Gravity: boolean       — whether the projectile follows an arc
+	--   ArcHeight: number      — arc height multiplier (fraction of distance, e.g. 0.3 = 30%)
+	--   ArcHeightCap: number   — max arc height in studs
+	--   Size: Vector3          — fallback size if no asset found
+	--   Bounce: boolean        — whether the projectile bounces off the ground on impact
+	--   BounceCount: number    — how many times it bounces (0 = no bounce)
+	--   BounceDamping: number  — height/speed retained per bounce (0-1, e.g. 0.5 = halved)
+	--   Damage: number?        — flat damage override (nil = uses move's DamageMult * AttackDamage)
+	----------------------------------------------------------------------
 	Projectiles = {
 		Rock = {
-			Asset = "Rock",        -- folder/part name under Assets.Projectiles
+			Asset = "Rock",
 			Speed = 80,
+			MaxRange = 60,
 			Gravity = true,
+			ArcHeight = 0.3,
+			ArcHeightCap = 15,
 			Size = Vector3.new(2, 2, 2),
+			Bounce = false,
+			BounceCount = 0,
+			BounceDamping = 0,
+			Damage = nil,
 		},
 		Tomato = {
 			Asset = "Tomato",
 			Speed = 60,
+			MaxRange = 45,
 			Gravity = true,
+			ArcHeight = 0.25,
+			ArcHeightCap = 12,
 			Size = Vector3.new(1.5, 1.5, 1.5),
+			Bounce = false,
+			BounceCount = 0,
+			BounceDamping = 0,
+			Damage = nil,
+		},
+		Pizza = {
+			Asset = "Pizza",
+			Speed = 25,
+			MaxRange = 60,
+			Gravity = true,
+			ArcHeight = 0.15,
+			ArcHeightCap = 5,
+			Size = Vector3.new(2, 0.4, 2),
+			Bounce = true,
+			BounceCount = 2,
+			BounceDamping = 0.5,
+			Damage = nil,
 		},
 		Fireball = {
 			Asset = "Fireball",
 			Speed = 120,
+			MaxRange = 80,
 			Gravity = false,
+			ArcHeight = 0,
+			ArcHeightCap = 0,
 			Size = Vector3.new(3, 3, 3),
+			Bounce = false,
+			BounceCount = 0,
+			BounceDamping = 0,
+			Damage = nil,
 		},
 		Bullet = {
 			Asset = "Bullet",
 			Speed = 300,
+			MaxRange = 200,
 			Gravity = false,
+			ArcHeight = 0,
+			ArcHeightCap = 0,
 			Size = Vector3.new(0.3, 0.3, 2),
+			Bounce = false,
+			BounceCount = 0,
+			BounceDamping = 0,
+			Damage = nil,
 		},
 		Bomb = {
 			Asset = "Bomb",
 			Speed = 40,
+			MaxRange = 40,
 			Gravity = true,
+			ArcHeight = 0.2,
+			ArcHeightCap = 8,
 			Size = Vector3.new(2.5, 2.5, 2.5),
+			Bounce = false,
+			BounceCount = 0,
+			BounceDamping = 0,
+			Damage = nil,
 		},
 	},
 
@@ -104,6 +169,8 @@ local AttackConfig = {
 		},
 
 		---------- PROJECTILE ----------
+		-- Spread: accuracy deviation in studs (0 = perfect aim, higher = worse)
+		-- AnimationKey: override for animation name (default per-module)
 		StandAndHurl = {
 			Type = "Projectile",
 			Weight = "Light",
@@ -112,6 +179,8 @@ local AttackConfig = {
 			WindupTime = 0.4,
 			DamageMult = 0.8,
 			Projectile = "Rock",
+			Spread = 2,            -- slight inaccuracy by default
+			AnimationKey = "Throw",
 		},
 		ChaseAndHurl = {
 			Type = "Projectile",
@@ -121,6 +190,8 @@ local AttackConfig = {
 			WindupTime = 0.3,
 			DamageMult = 0.6,
 			Projectile = "Tomato",
+			Spread = 3,            -- harder to aim while running
+			AnimationKey = "Throw",
 		},
 		DropAndRun = {
 			Type = "Projectile",
@@ -142,6 +213,7 @@ local AttackConfig = {
 			Projectile = "Bullet",
 			BurstCount = 3,
 			BurstDelay = 0.08,
+			Spread = 1,
 		},
 		BombDrop = {
 			Type = "Projectile",

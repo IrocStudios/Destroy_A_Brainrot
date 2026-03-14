@@ -251,6 +251,20 @@ local function resolveAttackMoves(brainrotName: string, personality: { [string]:
 	return { "BasicMelee" }
 end
 
+--- Merge per-brainrot MoveOverrides on top of a move config (shallow copy).
+local function applyMoveOverrides(brainrotName: string, moveName: string, baseCfg: { [string]: any }): { [string]: any }
+	local bCfg = getBrainrotConfig()
+	local entry = bCfg[brainrotName]
+	if not entry or type(entry.MoveOverrides) ~= "table" then return baseCfg end
+	local overrides = entry.MoveOverrides[moveName]
+	if type(overrides) ~= "table" then return baseCfg end
+
+	local merged = {}
+	for k, v in pairs(baseCfg) do merged[k] = v end
+	for k, v in pairs(overrides) do merged[k] = v end
+	return merged
+end
+
 local function resolveLocomotionType(brainrotName: string): string
 	local bCfg = getBrainrotConfig()
 	local entry = bCfg[brainrotName]
@@ -394,6 +408,18 @@ function AIService:Register(brainrotId: string, model: Model)
 	end
 
 	local brainrotName = tostring(model:GetAttribute("BrainrotName") or "Default")
+
+	-- Merge per-brainrot personality overrides on top of base personality
+	local bCfg = getBrainrotConfig()
+	local brainrotEntry = bCfg[brainrotName]
+	if brainrotEntry and type(brainrotEntry.PersonalityOverrides) == "table" then
+		-- Shallow copy P so we don't mutate the shared PersonalityConfig table
+		local merged = {}
+		for k, v in pairs(P) do merged[k] = v end
+		for k, v in pairs(brainrotEntry.PersonalityOverrides) do merged[k] = v end
+		P = merged
+	end
+
 	local spawnPos = hrp.Position
 	local leashRadius = pNumber(P, "LeashRadius", self.Config.DefaultLeashRadius)
 
@@ -539,16 +565,68 @@ function AIService:_onDamaged(entry: AIEntry)
 	if entry.State == "Dead" then return end
 
 	local P = entry.P
-	local retaliates = P.RetaliateOnDamage
-	if retaliates == nil then retaliates = true end -- default
+	local pName = entry.PersonalityName
 
-	local retaliateChance = pNumber(P, "RetaliateAggression", pNumber(P, "AttackChance", 0.10))
-	local runChance = pNumber(P, "RunWhenAttacked", pNumber(P, "RunChance", 0.25))
+	-- Helper: flee from nearest player
+	local function doFlee(fearTime: number?)
+		local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
+		local plr = select(1, pickNearestPlayer(entry.HRP.Position, aggroDist))
+		entry.FleeFrom = plr
+		entry.FleeUntil = now() + (fearTime or pNumber(P, "FearTime", 2.5))
+		self:_setState(entry, "Flee")
+	end
+
+	-- Helper: chase nearest player
+	local function doChase(): boolean
+		local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
+		local plr = select(1, pickNearestPlayer(entry.HRP.Position, aggroDist))
+		if plr then
+			entry.Target = plr
+			self:_setState(entry, "Chase")
+			return true
+		end
+		return false
+	end
+
+	-- Fearful: ALWAYS flee on damage, even interrupt current attacks
+	if pName == "Fearful" then
+		doFlee()
+		self:_signalPack(entry, "Flee")
+		return
+	end
 
 	-- If currently fleeing, don't re-evaluate
 	if entry.State == "Flee" and now() < entry.FleeUntil then
 		return
 	end
+
+	-- Aggressive/Berserk: ALWAYS retaliate, never flee
+	if pName == "Aggressive" or pName == "Berserk" then
+		if doChase() then
+			self:_signalPack(entry, "Chase", entry.Target)
+		end
+		return
+	end
+
+	-- Territorial: inside territory = always attack, outside = return to territory
+	if pName == "Territorial" then
+		local terr = entry.Territory
+		if terr and isInsideTerritoryXZ(terr, entry.HRP.Position) then
+			if doChase() then
+				self:_signalPack(entry, "Chase", entry.Target)
+			end
+		else
+			self:_setState(entry, "Return")
+		end
+		return
+	end
+
+	-- All other personalities: probabilistic but with guaranteed fallback
+	local retaliates = P.RetaliateOnDamage
+	if retaliates == nil then retaliates = true end
+
+	local retaliateChance = pNumber(P, "RetaliateAggression", pNumber(P, "AttackChance", 0.10))
+	local runChance = pNumber(P, "RunWhenAttacked", pNumber(P, "RunChance", 0.25))
 
 	-- Cornered aggression: if health is low and can't easily flee, boost aggression
 	local threat = computeThreatLevel(entry)
@@ -559,20 +637,77 @@ function AIService:_onDamaged(entry: AIEntry)
 	end
 
 	if math.random() < runChance then
-		local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
-		local plr = select(1, pickNearestPlayer(entry.HRP.Position, aggroDist))
-		entry.FleeFrom = plr
-		entry.FleeUntil = now() + pNumber(P, "FearTime", 2.5)
-		self:_setState(entry, "Flee")
+		doFlee()
+		self:_signalPack(entry, "Flee")
 		return
 	end
 
 	if retaliates and math.random() < retaliateChance then
-		local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
-		local plr = select(1, pickNearestPlayer(entry.HRP.Position, aggroDist))
-		if plr then
-			entry.Target = plr
-			self:_setState(entry, "Chase")
+		if doChase() then
+			self:_signalPack(entry, "Chase", entry.Target)
+			return
+		end
+	end
+
+	-- Guaranteed fallback: never just stand there after being hit
+	if entry.State == "Idle" or entry.State == "Wander" then
+		if pName == "Skittish" or pName == "Jumpy" then
+			doFlee(1.5) -- brief scatter
+		else
+			-- Passive or unknown: flee briefly
+			doFlee(2.0)
+		end
+	end
+end
+
+----------------------------------------------------------------------
+-- Pack behavior signaling
+----------------------------------------------------------------------
+
+function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?)
+	local brainrotName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
+	local allCfg = getBrainrotConfig()
+	local bCfg = allCfg[brainrotName]
+	if not bCfg or type(bCfg.PackBehavior) ~= "table" or not bCfg.PackBehavior.Enabled then
+		return
+	end
+
+	local packCfg = bCfg.PackBehavior
+	local shareStates = packCfg.ShareStates
+	if type(shareStates) ~= "table" then return end
+
+	-- Check if this state should propagate
+	local shouldShare = false
+	for _, s in ipairs(shareStates) do
+		if s == newState then shouldShare = true; break end
+	end
+	if not shouldShare then return end
+
+	-- Calculate signal radius (fraction of territory size)
+	local signalFrac = packCfg.SignalRange or 0.5
+	local radius = 30 -- fallback
+	if entry.Territory then
+		local tSize = entry.Territory.Size
+		radius = math.max(tSize.X, tSize.Z) * signalFrac
+	end
+
+	-- Signal nearby brainrots in same zone
+	for _, other in pairs(self._active) do
+		if other.Id == entry.Id then continue end
+		if other.State == "Dead" then continue end
+		if other.ZoneName ~= entry.ZoneName then continue end
+		if not other.HRP or not other.HRP.Parent then continue end
+
+		local dist = (other.HRP.Position - entry.HRP.Position).Magnitude
+		if dist <= radius then
+			if newState == "Chase" and target then
+				other.Target = target
+				self:_setState(other, "Chase")
+			elseif newState == "Flee" then
+				other.FleeFrom = entry.FleeFrom
+				other.FleeUntil = now() + pNumber(other.P, "FearTime", 2.5)
+				self:_setState(other, "Flee")
+			end
 		end
 	end
 end
@@ -727,7 +862,8 @@ function AIService:_stepOne(entry: AIEntry)
 	local runMaxDist = pNumber(entry.P, "RunMaxDistance", 150)
 
 	-- Determine effective attack range from available moves
-	local maxAttackRange = AttackRegistry:GetMaxRange(entry.AttackMoves)
+	local entryBrainrotName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
+	local maxAttackRange = AttackRegistry:GetMaxRange(entry.AttackMoves, entryBrainrotName)
 	if maxAttackRange > attackRange then
 		attackRange = maxAttackRange
 	end
@@ -934,13 +1070,18 @@ function AIService:_stepOne(entry: AIEntry)
 				)
 
 				if moveMod and moveCfg then
-					-- Set animation
-					if type(moveMod.GetAnimationName) == "function" then
-						local animName = moveMod:GetAnimationName()
-						safeSetAnim(entry, animName)
-					else
-						safeSetAnim(entry, "Attack")
+					-- Apply per-brainrot move overrides
+					local bName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
+					moveCfg = applyMoveOverrides(bName, moveName :: string, moveCfg)
+
+					-- Set animation (moveConfig AnimationKey override > module default)
+					local animName = "Attack"
+					if moveCfg.AnimationKey then
+						animName = "attack_" .. moveCfg.AnimationKey
+					elseif type(moveMod.GetAnimationName) == "function" then
+						animName = moveMod:GetAnimationName()
 					end
+					safeSetAnim(entry, animName)
 
 					-- Calculate cooldown
 					local cd = moveCfg.Cooldown or self.Config.DefaultAttackCooldown
