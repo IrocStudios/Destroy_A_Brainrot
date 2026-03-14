@@ -88,6 +88,64 @@ local BrainrotConfig = {
 				MinRange = 10,      -- won't throw if player is closer than 10 studs
 			},
 		},
+
+		-- Named variants: each spawns at a weighted chance with unique stats/behavior.
+		-- NameTag appends to DisplayName. SizeTier drives AI behavior ("baby"/"big"/"huge").
+		-- StatOverrides multiply base stats. VariantMoveOverrides merge on top of base MoveOverrides.
+		-- VariantPersonalityOverrides merge on top of base PersonalityOverrides.
+		-- NOT a new discovery — same brainrot, different index slot.
+		Variants = {
+			{
+				Name = "Normal",
+				Weight = 80,
+				-- No overrides: uses base config as-is
+			},
+			{
+				Name = "Small",
+				NameTag = "(Small)",
+				Weight = 15,
+				SizeMultiplier = 0.65,
+				SizeTier = "baby",
+				StatOverrides = {
+					AttackDamage = 0.5,   -- half damage (multiplier)
+				},
+				VariantMoveOverrides = {
+					StandAndHurl = {
+						Cooldown = 2.0,   -- throws 2x faster
+					},
+				},
+				VariantPersonalityOverrides = {
+					Aggressive = 0.02,
+					RunChance = 0.90,
+					RunWhenAttacked = 0.95,
+					RetaliateAggression = 0.05,
+					PursuitTenacity = 0.0,
+				},
+			},
+			{
+				Name = "Huge",
+				NameTag = "(Huge)",
+				Weight = 5,
+				SizeMultiplier = 1.5,
+				SizeTier = "huge",
+				VariantMoveOverrides = {
+					StandAndHurl = {
+						ProjectileCount = 5,  -- fires 5 pizzas at once
+						SpreadAngle = 25,     -- degrees of spread for shotgun pattern
+						Cooldown = 5.0,       -- slower between volleys
+						WindupTime = 0.8,     -- heavier windup
+					},
+				},
+				VariantPersonalityOverrides = {
+					Aggressive = 0.60,
+					RunChance = 0.10,
+					RunWhenAttacked = 0.10,
+					RetaliateAggression = 0.95,
+					PursuitTenacity = 0.80,
+					CorneredAggression = 0.95,
+				},
+			},
+		},
 	},
 
 	-----------------------------------------------------------------------
@@ -167,8 +225,8 @@ local BrainrotConfig = {
 		AttackMoves = { "BasicMelee", "HeavyMelee" },
 
 		PersonalityOverrides = {
-			AggroDistance = 35,        -- notices you approaching territory
-			ChaseRange = 70,           -- chases within territory range
+			AggroDistance = 45,         -- notices you approaching territory
+			ChaseRange = 150,          -- will chase far when provoked
 			AttackChance = 0.55,       -- likely to attack on sight
 			RunChance = 0.20,          -- may run if damaged
 			RunWhenAttacked = 0.25,    -- more likely to fight than flee
@@ -177,11 +235,11 @@ local BrainrotConfig = {
 			Forgive = 0.50,
 			ForgiveTime = 12,
 			RetaliateOnDamage = true,
-			RetaliateAggression = 0.75,
-			PursuitTenacity = 0.45,
+			RetaliateAggression = 0.85, -- very likely to fight back
+			PursuitTenacity = 0.70,    -- commits to chase (was 0.45 — too low)
 			HeavyAttackBias = 0.20,    -- ~20% charge/trample, ~80% scratch
 			CorneredAggression = 0.90,
-			LeashStrength = 0.85,      -- stays near territory
+			LeashStrength = 0.60,      -- willing to leave territory to pursue
 		},
 
 		MoveOverrides = {
@@ -189,12 +247,85 @@ local BrainrotConfig = {
 			HeavyMelee = { WindupTime = 0.4, DamageMult = 1.8, Range = 8 }, -- charge/trample
 		},
 
+		-- Named variants: normal/baby/big/huge moles with different combat styles
+		Variants = {
+			{
+				Name = "Normal",
+				Weight = 50,
+				-- No overrides: uses base config as-is
+			},
+			{
+				Name = "Baby",
+				NameTag = "(Baby)",
+				Weight = 30,
+				SizeMultiplier = 0.5,
+				SizeTier = "baby",
+				StatOverrides = {
+					AttackDamage = 0.5,   -- half damage
+				},
+				VariantMoveOverrides = {
+					BasicMelee = { DamageMult = 0.5 },  -- weaker scratch
+				},
+				VariantPersonalityOverrides = {
+					Aggressive = 0.02,
+					RunChance = 0.85,
+					RunWhenAttacked = 0.90,
+					AttackChance = 0.05,
+					RetaliateAggression = 0.10,
+					PursuitTenacity = 0.0,
+				},
+			},
+			{
+				Name = "Big",
+				NameTag = "(Big)",
+				Weight = 15,
+				SizeMultiplier = 1.2,
+				SizeTier = "big",
+				StatOverrides = {
+					AttackDamage = 1.3,   -- 30% more damage
+					Health = 1.3,
+				},
+				VariantPersonalityOverrides = {
+					Aggressive = 0.70,
+					RunChance = 0.08,
+					RunWhenAttacked = 0.10,
+					RetaliateAggression = 0.95,
+					PursuitTenacity = 0.85,
+					CorneredAggression = 0.95,
+				},
+			},
+			{
+				Name = "Huge",
+				NameTag = "(Huge)",
+				Weight = 5,
+				SizeMultiplier = 1.5,
+				SizeTier = "huge",
+				StatOverrides = {
+					AttackDamage = 1.8,   -- near-double damage
+					Health = 1.8,
+				},
+				VariantMoveOverrides = {
+					HeavyMelee = { DamageMult = 2.5, Range = 10 }, -- devastating charge
+				},
+				VariantPersonalityOverrides = {
+					Aggressive = 0.85,
+					RunChance = 0.03,
+					RunWhenAttacked = 0.03,
+					RetaliateAggression = 1.0,
+					PursuitTenacity = 0.95,
+					CorneredAggression = 1.0,
+					HeavyAttackBias = 0.40, -- charges more often
+				},
+			},
+		},
+
 		-- Pack animal: signals nearby Burbalonis to share attack/flee state
-		-- SignalRange = 0.5 means half the territory size
+		-- SignalRange = 0.75 means 3/4 of territory size
 		PackBehavior = {
 			Enabled = true,
-			SignalRange = 0.5,
+			SignalRange = 0.75,
 			ShareStates = { "Chase", "Flee" },
+			PackJoinChance = 0.80, -- high chance neighbors join a Chase (distance falloff on top)
 		},
 	},
 

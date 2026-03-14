@@ -334,6 +334,16 @@ function BrainrotClient:_attach(entry: ActiveEntry)
 	body.Name = "Body"
 	body.Parent = entry.Model
 
+	-- Scale the Body RELATIVE to its original scale (not absolute).
+	-- e.g. if Body starts at scale 0.005 and sizeMult is 0.5, target = 0.005 * 0.5 = 0.0025
+	local sizeMult = entry.Model:GetAttribute("SizeMultiplier")
+	if typeof(sizeMult) == "number" and sizeMult ~= 1.0 then
+		pcall(function()
+			local originalScale = body:GetScale()
+			body:ScaleTo(originalScale * sizeMult)
+		end)
+	end
+
 	setNoCollideMassless(body)
 
 	local bodyRoot = findBodyRoot(body)

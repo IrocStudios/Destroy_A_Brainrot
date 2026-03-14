@@ -300,61 +300,67 @@ local function getBrainrotConfig(): { [string]: any }
 end
 
 ----------------------------------------------------------------------
--- Size variation
+-- Variant system (replaces old SizeVariation)
+-- Each brainrot can define Variants: array of named variants with
+-- Weight, SizeMultiplier, NameTag, SizeTier, StatOverrides, etc.
+-- Returns the chosen variant table (or nil for default/no variants).
 ----------------------------------------------------------------------
 
-local function rollSizeMultiplier(brainrotName: string): (number, number, boolean)
+type VariantResult = {
+	Name: string,
+	NameTag: string?,
+	SizeMultiplier: number,
+	SizeTier: string,
+	StatOverrides: { [string]: number }?,
+	VariantMoveOverrides: { [string]: any }?,
+	VariantPersonalityOverrides: { [string]: any }?,
+}
+
+local function rollVariant(brainrotName: string): VariantResult
 	local config = getBrainrotConfig()
 	local entry = config[brainrotName]
-	if not entry or type(entry.SizeVariation) ~= "table" then
-		return 1.0, 1.0, false -- sizeMultiplier, effectiveMultiplier, inverted
+
+	-- Default result (no variant)
+	local defaultResult: VariantResult = {
+		Name = "Normal",
+		NameTag = nil,
+		SizeMultiplier = 1.0,
+		SizeTier = "normal",
+	}
+
+	if not entry or type(entry.Variants) ~= "table" or #entry.Variants == 0 then
+		return defaultResult
 	end
 
-	local sv = entry.SizeVariation
-	local dist = sv.Distribution
-	local inverted = (sv.Inverted == true)
-
-	if type(dist) ~= "table" or #dist == 0 then
-		return 1.0, 1.0, inverted
-	end
-
-	-- Weighted bucket pick
+	-- Weighted pick from Variants array
 	local totalWeight = 0
-	for _, bucket in ipairs(dist) do
-		totalWeight += (tonumber(bucket.Weight) or 0)
+	for _, v in ipairs(entry.Variants) do
+		totalWeight += (tonumber(v.Weight) or 0)
 	end
-	if totalWeight <= 0 then
-		return 1.0, 1.0, inverted
-	end
+	if totalWeight <= 0 then return defaultResult end
 
 	local roll = math.random() * totalWeight
 	local acc = 0
-	local chosenRange = { 1.0, 1.0 }
-	for _, bucket in ipairs(dist) do
-		acc += (tonumber(bucket.Weight) or 0)
+	local chosen = nil
+	for _, v in ipairs(entry.Variants) do
+		acc += (tonumber(v.Weight) or 0)
 		if roll <= acc then
-			if type(bucket.Range) == "table" and #bucket.Range >= 2 then
-				chosenRange = bucket.Range
-			end
+			chosen = v
 			break
 		end
 	end
 
-	local lo = tonumber(chosenRange[1]) or 1.0
-	local hi = tonumber(chosenRange[2]) or lo
-	if hi < lo then hi = lo end
+	if not chosen then return defaultResult end
 
-	local sizeMult = lo + math.random() * (hi - lo)
-	sizeMult = math.floor(sizeMult * 100 + 0.5) / 100 -- round to 2 decimals
-
-	local effectiveMult: number
-	if inverted then
-		effectiveMult = 1 / sizeMult
-	else
-		effectiveMult = sizeMult
-	end
-
-	return sizeMult, effectiveMult, inverted
+	return {
+		Name = chosen.Name or "Normal",
+		NameTag = chosen.NameTag,
+		SizeMultiplier = tonumber(chosen.SizeMultiplier) or 1.0,
+		SizeTier = chosen.SizeTier or "normal",
+		StatOverrides = type(chosen.StatOverrides) == "table" and chosen.StatOverrides or nil,
+		VariantMoveOverrides = type(chosen.VariantMoveOverrides) == "table" and chosen.VariantMoveOverrides or nil,
+		VariantPersonalityOverrides = type(chosen.VariantPersonalityOverrides) == "table" and chosen.VariantPersonalityOverrides or nil,
+	}
 end
 
 local function randomPointInTerritory(territory: BasePart): Vector3
@@ -383,8 +389,9 @@ end
 
 local function findSafeSpawnPoint(territory: BasePart, tries: number, boxSize: Vector3?): Vector3
 	local checkSize = boxSize or Vector3.new(6, 10, 6)
+	local terrTop = territory.Position.Y + (territory.Size.Y * 0.5)
 
-	-- Exclude: territory zone folder, existing enemies, and exclusion zone parts
+	-- Exclude: territory zone folder, existing enemies, terrain, baseplate
 	local excludeList: { Instance } = {}
 	if territory.Parent then
 		table.insert(excludeList, territory.Parent)
@@ -393,34 +400,32 @@ local function findSafeSpawnPoint(territory: BasePart, tries: number, boxSize: V
 	if enemiesFolder then
 		table.insert(excludeList, enemiesFolder)
 	end
+	if Workspace.Terrain then
+		table.insert(excludeList, Workspace.Terrain)
+	end
+	local baseplate = Workspace:FindFirstChild("Baseplate")
+	if baseplate then
+		table.insert(excludeList, baseplate)
+	end
 
 	local params = OverlapParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = excludeList
-
-	local rayParams = RaycastParams.new()
-	rayParams.FilterType = Enum.RaycastFilterType.Exclude
-	rayParams.FilterDescendantsInstances = excludeList
 
 	-- Collect valid candidate positions, scored by distance from players
 	local candidates: { { pos: Vector3, dist: number } } = {}
 
 	for attempt = 1, tries do
 		local p = randomPointInTerritory(territory)
+		-- Place at territory top surface
+		p = Vector3.new(p.X, terrTop + checkSize.Y * 0.5, p.Z)
 
-		-- Reject if inside any exclusion zone (regardless of weight)
+		-- Reject if inside any exclusion zone
 		if ExclusionZoneManager:IsBlocked(p, 1) then
 			continue
 		end
 
-		-- Downward raycast to find ground surface
-		local rayOrigin = Vector3.new(p.X, p.Y + 50, p.Z)
-		local rayResult = Workspace:Raycast(rayOrigin, Vector3.new(0, -200, 0), rayParams)
-		if rayResult then
-			p = Vector3.new(p.X, rayResult.Position.Y + checkSize.Y * 0.5, p.Z)
-		end
-
-		-- Overlap check: ensure no collidable geometry at spawn point
+		-- Overlap check: ensure no collidable parts at spawn point
 		local boxCF = CFrame.new(p)
 		local hits = Workspace:GetPartBoundsInBox(boxCF, checkSize, params)
 		local blocked = false
@@ -442,24 +447,9 @@ local function findSafeSpawnPoint(territory: BasePart, tries: number, boxSize: V
 		return pick.pos
 	end
 
-	-- Fallback: try territory edge points instead of center
-	local terrCF = territory.CFrame
-	local terrSize = territory.Size
-	local edges = {
-		(terrCF * CFrame.new(terrSize.X * 0.4, 0, 0)).Position,
-		(terrCF * CFrame.new(-terrSize.X * 0.4, 0, 0)).Position,
-		(terrCF * CFrame.new(0, 0, terrSize.Z * 0.4)).Position,
-		(terrCF * CFrame.new(0, 0, -terrSize.Z * 0.4)).Position,
-	}
-	for _, ep in ipairs(edges) do
-		if not ExclusionZoneManager:IsBlocked(ep, 1) then
-			return ep
-		end
-	end
-
-	-- Last resort: territory center (better than nil)
+	-- Fallback: territory center at top surface
 	dwarn("findSafeSpawnPoint exhausted all options for", territory:GetFullName())
-	return Vector3.new(territory.Position.X, territory.Position.Y, territory.Position.Z)
+	return Vector3.new(territory.Position.X, terrTop + checkSize.Y * 0.5, territory.Position.Z)
 end
 
 local function getZoneParts(zone: Instance): (BasePart, Configuration, Folder)
@@ -684,11 +674,12 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 	local brainrotName = weightedPick(zoneRt.EnemyWeights)
 	local guid = HttpService:GenerateGUID(false)
 
-	-- Roll size variation
-	local sizeMult, effectiveMult, sizeInverted = rollSizeMultiplier(brainrotName)
+	-- Roll variant (replaces old SizeVariation)
+	local variant = rollVariant(brainrotName)
+	local sizeMult = variant.SizeMultiplier
 
 	dprint("Spawning brainrot:", "Name=", brainrotName, "Zone=", zoneRt.Name, "Id=", guid,
-		"Size=", sizeMult, "Effective=", effectiveMult, "Inverted=", sizeInverted)
+		"Variant=", variant.Name, "Size=", sizeMult, "Tier=", variant.SizeTier)
 
 	local model = template:Clone()
 	model.Name = ("Brainrot_%s"):format(guid)
@@ -698,8 +689,14 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 	model:SetAttribute("ZoneName", zoneRt.Name)
 	model:SetAttribute("IsDead", false)
 	model:SetAttribute("SizeMultiplier", sizeMult)
-	model:SetAttribute("EffectiveMultiplier", effectiveMult)
-	model:SetAttribute("SizeInverted", sizeInverted)
+	model:SetAttribute("EffectiveMultiplier", sizeMult) -- effective = size (no inversion)
+	model:SetAttribute("VariantName", variant.Name)
+	model:SetAttribute("SizeTier", variant.SizeTier)
+
+	-- Store variant name tag for display name modification
+	if variant.NameTag then
+		model:SetAttribute("VariantNameTag", variant.NameTag)
+	end
 
 	local currentAnim = ensureCurrentAnimation(model)
 	currentAnim.Value = "Idle"
@@ -714,51 +711,55 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 
 	local maxHealth, totalValue, rarityName = self:_applyBaseline(model, brainrotName)
 
-	-- Apply size scaling to stats
+	-- Apply variant stat overrides (multipliers on base stats)
+	local statOverrides = variant.StatOverrides
+	if statOverrides then
+		local enemyInfo = model:FindFirstChild("EnemyInfo")
+		if enemyInfo and enemyInfo:IsA("Configuration") then
+			for statName, mult in pairs(statOverrides) do
+				local base = enemyInfo:GetAttribute(statName)
+				if typeof(base) == "number" then
+					enemyInfo:SetAttribute(statName, math.floor(base * mult + 0.5))
+				end
+			end
+		end
+		-- If AttackDamage was overridden, also scale the health/value proportionally
+		-- (not strictly needed, but keeps balance consistent)
+	end
+
+	-- Apply variant name tag to display name
+	if variant.NameTag then
+		local enemyInfo = model:FindFirstChild("EnemyInfo")
+		if enemyInfo and enemyInfo:IsA("Configuration") then
+			local displayName = enemyInfo:GetAttribute("DisplayName")
+			if type(displayName) == "string" then
+				enemyInfo:SetAttribute("DisplayName", displayName .. " " .. variant.NameTag)
+			end
+		end
+	end
+
+	-- Apply size scaling to model + stats
 	if sizeMult ~= 1.0 then
-		-- Scale model physically
+		-- Scale model RELATIVE to its original scale (multiply, not set absolute)
 		pcall(function()
-			model:ScaleTo(sizeMult)
+			local originalScale = model:GetScale()
+			model:ScaleTo(originalScale * sizeMult)
 		end)
 
-		-- Scale stats by effective multiplier
-		maxHealth = math.floor(maxHealth * effectiveMult + 0.5)
+		-- Scale HP and value by size
+		maxHealth = math.floor(maxHealth * sizeMult + 0.5)
 		hum.MaxHealth = maxHealth
 		hum.Health = maxHealth
 
-		totalValue = math.floor(totalValue * effectiveMult + 0.5)
+		totalValue = math.floor(totalValue * sizeMult + 0.5)
 
-		-- Scale attack damage and cooldown on EnemyInfo
 		local enemyInfo = model:FindFirstChild("EnemyInfo")
 		if enemyInfo and enemyInfo:IsA("Configuration") then
-			local baseDmg = enemyInfo:GetAttribute("AttackDamage")
-			if typeof(baseDmg) == "number" then
-				enemyInfo:SetAttribute("AttackDamage", math.floor(baseDmg * effectiveMult + 0.5))
-			end
-
-			local baseCd = enemyInfo:GetAttribute("AttackCooldown")
-			if typeof(baseCd) == "number" then
-				enemyInfo:SetAttribute("AttackCooldown", baseCd / effectiveMult)
-			end
-
-			-- Scale movement speed: bigger = slightly slower (physical, not inverted)
-			-- Uses S^0.3 so a 1.8x brainrot is ~17% slower, not 80%
-			local speedScale = 1 / (sizeMult ^ 0.3)
-			local baseWalk = enemyInfo:GetAttribute("Walkspeed")
-			if typeof(baseWalk) == "number" then
-				enemyInfo:SetAttribute("Walkspeed", math.floor(baseWalk * speedScale * 100 + 0.5) / 100)
-			end
-			local baseRun = enemyInfo:GetAttribute("Runspeed")
-			if typeof(baseRun) == "number" then
-				enemyInfo:SetAttribute("Runspeed", math.floor(baseRun * speedScale * 100 + 0.5) / 100)
-			end
-
-			-- Update Price for value payout
 			enemyInfo:SetAttribute("Price", totalValue)
 		end
 
 		dprint("Size-scaled stats:", brainrotName, "HP=", maxHealth, "Value=", totalValue,
-			"SizeMult=", sizeMult, "EffMult=", effectiveMult)
+			"SizeMult=", sizeMult)
 	end
 
 	-- Resize HRP to match body (after scaling)
@@ -787,7 +788,23 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 		end
 	end
 
+	-- Re-position AFTER HRP resize so we use the final HRP size
+	-- Ground = top surface of territory (Position.Y + Size.Y/2)
+	-- Place HRP so its bottom sits on the ground + 1 stud buffer
+	do
+		local terrTop = zoneRt.Territory.Position.Y + (zoneRt.Territory.Size.Y * 0.5)
+		local adjustedY = terrTop + (hrp.Size.Y * 0.5) + 1
+		model:PivotTo(CFrame.new(spawnPos.X, adjustedY, spawnPos.Z))
+	end
+
 	model.Parent = enemiesFolder
+
+	-- Build index key: base name for Normal, "BaseName:VariantName" for non-default variants
+	local indexKey = brainrotName
+	if variant.Name ~= "Normal" and variant.Name ~= "" then
+		indexKey = brainrotName .. ":" .. variant.Name
+	end
+	model:SetAttribute("IndexKey", indexKey)
 
 	local ptr = Instance.new("ObjectValue")
 	ptr.Name = "Enemy"
@@ -809,7 +826,7 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 	local combat = self.Services and self.Services.CombatService
 	if combat and type(combat.RegisterBrainrot) == "function" then
 		pcall(function()
-			combat:RegisterBrainrot(guid, hum, hrp, maxHealth, totalValue, rarityName, brainrotName)
+			combat:RegisterBrainrot(guid, hum, hrp, maxHealth, totalValue, rarityName, indexKey)
 		end)
 	else
 		dwarn("CombatService missing or RegisterBrainrot missing; no payouts will occur.")

@@ -86,10 +86,24 @@ function IndexService:RegisterDiscovery(player: Player, brainrotName: string, br
 		end
 
 		-- Look up display name from config if not provided
+		-- Supports variant keys like "Noobini_Pizzanini:Small"
 		local displayName = brainrotDisplayName
 		if not displayName or displayName == "" then
-			local entry = self._brainrotConfig[brainrotName]
-			displayName = entry and entry.DisplayName or brainrotName
+			local baseName, variantSuffix = brainrotName:match("^(.+):(.+)$")
+			if not baseName then baseName = brainrotName end
+
+			local entry = self._brainrotConfig[baseName]
+			displayName = entry and entry.DisplayName or baseName
+
+			-- Append variant name tag if this is a variant entry
+			if variantSuffix and entry and type(entry.Variants) == "table" then
+				for _, v in ipairs(entry.Variants) do
+					if v.Name == variantSuffix and v.NameTag then
+						displayName = displayName .. " " .. v.NameTag
+						break
+					end
+				end
+			end
 		end
 
 		-- Notify client to show Discovery popup

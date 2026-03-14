@@ -93,6 +93,7 @@ function DiscoveryModule:Init(ctx: any)
 	self._spinTween   = nil :: Tween?
 	self._shrinkTween = nil :: Tween?
 	self._open        = false
+	self._queue       = {} :: { any }  -- queued discovery payloads
 	self._frame       = ctx.FramesFolder and ctx.FramesFolder:FindFirstChild("Discovery")
 
 	if not self._frame then
@@ -133,6 +134,16 @@ end
 function DiscoveryModule:Show(payload: any)
 	if not self._frame then return end
 
+	-- If currently showing or shrinking, queue this discovery for later
+	if self._open then
+		table.insert(self._queue, payload)
+		return
+	end
+
+	self:_showImmediate(payload)
+end
+
+function DiscoveryModule:_showImmediate(payload: any)
 	local brainrotId  = tostring(payload.brainrotId or payload.id or "")
 	local displayName = tostring(payload.name or brainrotId)
 	local rarityName  = tostring(payload.rarity or "Common")
@@ -181,6 +192,16 @@ function DiscoveryModule:Show(payload: any)
 	end)
 end
 
+--- Process the next queued discovery after the current one finishes
+function DiscoveryModule:_processNext()
+	if #self._queue == 0 then return end
+	local next = table.remove(self._queue, 1)
+	-- Small delay so the close animation fully settles before the next open
+	task.delay(0.3, function()
+		self:_showImmediate(next)
+	end)
+end
+
 function DiscoveryModule:_cancelTimers()
 	if self._autoClose then
 		task.cancel(self._autoClose)
@@ -205,15 +226,16 @@ function DiscoveryModule:_shrinkOut()
 	self._shrinkTween = TweenService:Create(self._uiScale :: Instance, info, { Scale = 0 })
 	self._shrinkTween.Completed:Once(function()
 		self._shrinkTween = nil
-		-- We already animated to scale 0, so hide directly without Router:Close
-		-- (Router:Close would run its own scale-down animation, causing a double-close)
 		self._open = false
 		self:_stopShine()
-		self._frame.Visible = false
-		-- Reset UIScale to 1 so the next Show() / Router:Open works correctly
-		if self._uiScale then
-			(self._uiScale :: UIScale).Scale = 1
+		-- Clear Router's Current so next Open("Discovery") doesn't toggle-close.
+		-- Leave UIScale at 0 — Router:Open will reset it to 0 then animate to 1.
+		local router = self._ctx.Router
+		if router and router.Current == self._frame then
+			router.Current = nil
 		end
+		-- Show next queued discovery if any
+		self:_processNext()
 	end)
 	self._shrinkTween:Play()
 end
@@ -229,6 +251,9 @@ function DiscoveryModule:_hide()
 	if self._ctx.Router then
 		self._ctx.Router:Close("Discovery")
 	end
+
+	-- Show next queued discovery if any
+	self:_processNext()
 end
 
 -- ── Icon ─────────────────────────────────────────────────────────────────────
@@ -246,7 +271,9 @@ function DiscoveryModule:_setIcon(brainrotId: string)
 	if not self._brainrotsFolder then return end
 
 	-- Each brainrot is a Folder: { Body [Model], Icon [ImageLabel] }
-	local brainrotFolder = self._brainrotsFolder:FindFirstChild(brainrotId)
+	-- Support variant keys like "Noobini_Pizzanini:Small" → use base name for folder lookup
+	local baseName = brainrotId:match("^(.+):") or brainrotId
+	local brainrotFolder = self._brainrotsFolder:FindFirstChild(baseName)
 	if not brainrotFolder then
 		-- Fallback to Default
 		brainrotFolder = self._brainrotsFolder:FindFirstChild("Default")

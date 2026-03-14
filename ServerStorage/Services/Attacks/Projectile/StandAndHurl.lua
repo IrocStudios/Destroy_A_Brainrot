@@ -95,17 +95,7 @@ function StandAndHurl:Execute(entry: any, target: any, services: any, moveConfig
 	if not entry.HRP then return end
 
 	local origin = entry.HRP.Position + Vector3.new(0, 2, 0) -- throw from above head
-	local targetPos = targetHRP.Position
-
-	-- Apply accuracy spread
-	local spread = (moveConfig and moveConfig.Spread) or 0
-	if spread > 0 then
-		targetPos = targetPos + Vector3.new(
-			(math.random() - 0.5) * 2 * spread,
-			(math.random() - 0.5) * spread * 0.5,
-			(math.random() - 0.5) * 2 * spread
-		)
-	end
+	local baseTargetPos = targetHRP.Position
 
 	-- Determine projectile skin
 	local projectileSkin = (moveConfig and moveConfig.Projectile) or "Rock"
@@ -119,9 +109,7 @@ function StandAndHurl:Execute(entry: any, target: any, services: any, moveConfig
 	local projCfg = getAttackConfig().Projectiles and getAttackConfig().Projectiles[projectileSkin]
 	if not projCfg then projCfg = { Speed = 80 } end
 	local speed = projCfg.Speed or 80
-	local dist = (targetPos - origin).Magnitude
 	local maxRange = projCfg.MaxRange
-	if maxRange and dist > maxRange then return end -- out of range
 
 	-- Pre-calculate damage (used if we hit someone)
 	local finalDamage: number
@@ -157,94 +145,155 @@ function StandAndHurl:Execute(entry: any, target: any, services: any, moveConfig
 		end)
 	end
 
-	-- Collision detection via ProjectileSimulator
-	local sim = getSimulator()
-	if not sim then
-		-- Fallback: old behavior if simulator not found
+	-- Multi-projectile support: calculate spread targets
+	local projectileCount = (moveConfig and moveConfig.ProjectileCount) or 1
+	local spreadAngleDeg = (moveConfig and moveConfig.SpreadAngle) or 0
+	local baseSpread = (moveConfig and moveConfig.Spread) or 0
+
+	-- Build list of target positions for each projectile
+	local targetList = {}
+	if projectileCount <= 1 then
+		-- Single projectile: use normal accuracy spread
+		local tp = baseTargetPos
+		if baseSpread > 0 then
+			tp = tp + Vector3.new(
+				(math.random() - 0.5) * 2 * baseSpread,
+				(math.random() - 0.5) * baseSpread * 0.5,
+				(math.random() - 0.5) * 2 * baseSpread
+			)
+		end
+		table.insert(targetList, tp)
+	else
+		-- Multi-projectile shotgun spread: fan evenly across spreadAngle
+		local dir = (baseTargetPos - origin) * Vector3.new(1, 0, 1) -- XZ direction
+		if dir.Magnitude < 0.1 then dir = Vector3.new(0, 0, 1) end
+		dir = dir.Unit
+		local dist2D = (baseTargetPos - origin).Magnitude
+
+		local halfAngle = math.rad(spreadAngleDeg / 2)
+		for i = 1, projectileCount do
+			-- Evenly distribute angles from -halfAngle to +halfAngle
+			local frac = (i - 1) / math.max(projectileCount - 1, 1)
+			local angle = -halfAngle + frac * (halfAngle * 2)
+			-- Rotate direction around Y axis
+			local cosA = math.cos(angle)
+			local sinA = math.sin(angle)
+			local rotDir = Vector3.new(
+				dir.X * cosA - dir.Z * sinA,
+				0,
+				dir.X * sinA + dir.Z * cosA
+			)
+			local tp = origin + rotDir * dist2D + Vector3.new(0, baseTargetPos.Y - origin.Y, 0)
+			-- Add per-projectile accuracy jitter
+			if baseSpread > 0 then
+				tp = tp + Vector3.new(
+					(math.random() - 0.5) * 2 * baseSpread,
+					(math.random() - 0.5) * baseSpread * 0.5,
+					(math.random() - 0.5) * 2 * baseSpread
+				)
+			end
+			table.insert(targetList, tp)
+		end
+	end
+
+	-- Fire each projectile (spawn concurrently for multi-projectile)
+	local function fireOneProjectile(targetPos: Vector3)
+		local dist = (targetPos - origin).Magnitude
+		if maxRange and dist > maxRange then return end
+
+		local sim = getSimulator()
+		if not sim then
+			-- Fallback: no simulator
+			local fxRemote = getAttackFXRemote()
+			if fxRemote then
+				fxRemote:FireAllClients({
+					AttackType = "Projectile",
+					MoveName = "StandAndHurl",
+					Origin = origin,
+					Target = targetPos,
+					ProjectileSkin = projectileSkin,
+					BrainrotId = entry.Id,
+				})
+			end
+			local travelTime = math.clamp(dist / speed, 0.05, 2.0)
+			task.wait(travelTime)
+			local tc = target and target.Character
+			if tc then
+				local th = tc:FindFirstChildOfClass("Humanoid")
+				local tr = tc:FindFirstChild("HumanoidRootPart")
+				if th and th.Health > 0 and tr and tr:IsA("BasePart") then
+					if (tr.Position - targetPos).Magnitude <= 10 then
+						applyDamageToPlayer(target)
+					end
+				end
+			end
+			return
+		end
+
+		-- Phase 1: Pre-calc wall collisions
+		local adjustedTarget, wallFrac = sim.CheckWalls(origin, targetPos, projCfg, { entry.Model })
+		local hitWall = wallFrac < 0.99
+
+		-- Fire client FX
 		local fxRemote = getAttackFXRemote()
 		if fxRemote then
 			fxRemote:FireAllClients({
 				AttackType = "Projectile",
 				MoveName = "StandAndHurl",
 				Origin = origin,
-				Target = targetPos,
+				Target = adjustedTarget,
 				ProjectileSkin = projectileSkin,
 				BrainrotId = entry.Id,
+				HitType = hitWall and "wall" or nil,
 			})
 		end
-		local travelTime = math.clamp(dist / speed, 0.05, 2.0)
-		task.wait(travelTime)
-		targetChar = target and target.Character
-		if targetChar then
-			targetHum = targetChar:FindFirstChildOfClass("Humanoid")
-			targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
-			if targetHum and targetHum.Health > 0 and targetHRP and targetHRP:IsA("BasePart") then
-				if (targetHRP.Position - targetPos).Magnitude <= 10 then
-					applyDamageToPlayer(target)
+
+		-- Phase 2: Stepped player detection along the arc
+		local arcPoints = sim.CalculateArcPoints(origin, adjustedTarget, projCfg)
+		local numSteps = #arcPoints - 1
+		local adjustedDist = (adjustedTarget - origin).Magnitude
+		local travelTime = math.clamp(adjustedDist / speed, 0.05, 2.0)
+		local stepDt = travelTime / numSteps
+
+		local playerRayParams = sim.MakePlayerCheckParams(entry.Model)
+
+		for i = 1, numSteps do
+			task.wait(stepDt)
+			local result = sim.StepAndCheck(arcPoints[i], arcPoints[i + 1], playerRayParams)
+			if result then
+				local hitChar, hitPlayer = sim.FindCharacterFromHit(result.Instance)
+				if hitPlayer then
+					applyDamageToPlayer(hitPlayer)
+					return
 				end
 			end
 		end
-		return
+
+		if hitWall then return end
+
+		-- End-of-arc proximity check (dodge mechanic)
+		local tc = target and target.Character
+		if not tc then return end
+		local th = tc:FindFirstChildOfClass("Humanoid")
+		if not th or th.Health <= 0 then return end
+		local tr = tc:FindFirstChild("HumanoidRootPart")
+		if not tr or not tr:IsA("BasePart") then return end
+
+		local impactDist = (tr.Position - adjustedTarget).Magnitude
+		if impactDist > 10 then return end
+
+		applyDamageToPlayer(target)
 	end
 
-	-- Phase 1: Pre-calc wall collisions (adjust target so visual stops at walls)
-	local adjustedTarget, wallFrac = sim.CheckWalls(origin, targetPos, projCfg, { entry.Model })
-	local hitWall = wallFrac < 0.99
-
-	-- Fire client FX with wall-adjusted target
-	local fxRemote = getAttackFXRemote()
-	if fxRemote then
-		fxRemote:FireAllClients({
-			AttackType = "Projectile",
-			MoveName = "StandAndHurl",
-			Origin = origin,
-			Target = adjustedTarget,
-			ProjectileSkin = projectileSkin,
-			BrainrotId = entry.Id,
-			HitType = hitWall and "wall" or nil,
-		})
-	end
-
-	-- Phase 2: Real-time stepped player detection along the arc
-	local arcPoints = sim.CalculateArcPoints(origin, adjustedTarget, projCfg)
-	local numSteps = #arcPoints - 1
-	local adjustedDist = (adjustedTarget - origin).Magnitude
-	local travelTime = math.clamp(adjustedDist / speed, 0.05, 2.0)
-	local stepDt = travelTime / numSteps
-
-	local playerRayParams = sim.MakePlayerCheckParams(entry.Model)
-
-	for i = 1, numSteps do
-		task.wait(stepDt)
-
-		-- Raycast this segment for player characters
-		local result = sim.StepAndCheck(arcPoints[i], arcPoints[i + 1], playerRayParams)
-		if result then
-			local hitChar, hitPlayer = sim.FindCharacterFromHit(result.Instance)
-			if hitPlayer then
-				applyDamageToPlayer(hitPlayer)
-				return -- projectile hit someone, done
-			end
+	-- Launch all projectiles
+	if #targetList == 1 then
+		fireOneProjectile(targetList[1])
+	else
+		-- Multi-projectile: fire all concurrently
+		for _, tp in ipairs(targetList) do
+			task.spawn(fireOneProjectile, tp)
 		end
 	end
-
-	-- Reached end of arc without hitting a player mid-flight
-	if hitWall then
-		return -- splatted against wall, no damage
-	end
-
-	-- No wall, no mid-flight hit: existing proximity check (dodge mechanic)
-	targetChar = target and target.Character
-	if not targetChar then return end
-	targetHum = targetChar:FindFirstChildOfClass("Humanoid")
-	if not targetHum or targetHum.Health <= 0 then return end
-	targetHRP = targetChar:FindFirstChild("HumanoidRootPart")
-	if not targetHRP or not targetHRP:IsA("BasePart") then return end
-
-	local impactDist = (targetHRP.Position - adjustedTarget).Magnitude
-	if impactDist > 10 then return end -- target dodged
-
-	applyDamageToPlayer(target)
 end
 
 function StandAndHurl:GetAnimationName(): string

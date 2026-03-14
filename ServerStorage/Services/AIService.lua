@@ -67,6 +67,11 @@ type AIEntry = {
 	WaitEdgeZone: any?,
 	WaitEdgeUntil: number,
 
+	-- Size tier: "baby" | "normal" | "big" | "huge" (affects behavior)
+	SizeTier: string,
+	SizeMultiplier: number,
+	BrainrotName: string,
+
 	Conn: { RBXScriptConnection },
 }
 
@@ -187,6 +192,14 @@ local function isInsideTerritoryXZ(terr: BasePart, pos: Vector3): boolean
 	return math.abs(localPos.X) <= terr.Size.X * 0.5 and math.abs(localPos.Z) <= terr.Size.Z * 0.5
 end
 
+--- Get the effective "reach" of a territory — the larger of X or Z extent.
+--- Returns a fallback (60) if no territory is assigned.
+local function getTerritorySpan(entry: any): number
+	local terr = entry.Territory
+	if not terr then return 60 end
+	return math.max(terr.Size.X, terr.Size.Z)
+end
+
 local function getAttrNumber(info: Configuration?, name: string, default: number): number
 	if not info then return default end
 	local v = info:GetAttribute(name)
@@ -251,17 +264,40 @@ local function resolveAttackMoves(brainrotName: string, personality: { [string]:
 	return { "BasicMelee" }
 end
 
---- Merge per-brainrot MoveOverrides on top of a move config (shallow copy).
-local function applyMoveOverrides(brainrotName: string, moveName: string, baseCfg: { [string]: any }): { [string]: any }
+--- Merge per-brainrot MoveOverrides + VariantMoveOverrides on top of a move config (shallow copy).
+--- Layer order: baseCfg → BrainrotConfig.MoveOverrides → Variant.VariantMoveOverrides
+local function applyMoveOverrides(brainrotName: string, moveName: string, baseCfg: { [string]: any }, variantName: string?): { [string]: any }
 	local bCfg = getBrainrotConfig()
-	local entry = bCfg[brainrotName]
-	if not entry or type(entry.MoveOverrides) ~= "table" then return baseCfg end
-	local overrides = entry.MoveOverrides[moveName]
-	if type(overrides) ~= "table" then return baseCfg end
+	local bEntry = bCfg[brainrotName]
+	if not bEntry then return baseCfg end
 
+	-- Start with base
 	local merged = {}
 	for k, v in pairs(baseCfg) do merged[k] = v end
-	for k, v in pairs(overrides) do merged[k] = v end
+
+	-- Layer 1: base MoveOverrides from BrainrotConfig
+	if type(bEntry.MoveOverrides) == "table" then
+		local overrides = bEntry.MoveOverrides[moveName]
+		if type(overrides) == "table" then
+			for k, v in pairs(overrides) do merged[k] = v end
+		end
+	end
+
+	-- Layer 2: VariantMoveOverrides from the specific variant
+	if variantName and type(bEntry.Variants) == "table" then
+		for _, variant in ipairs(bEntry.Variants) do
+			if variant.Name == variantName then
+				if type(variant.VariantMoveOverrides) == "table" then
+					local vOverrides = variant.VariantMoveOverrides[moveName]
+					if type(vOverrides) == "table" then
+						for k, v in pairs(vOverrides) do merged[k] = v end
+					end
+				end
+				break
+			end
+		end
+	end
+
 	return merged
 end
 
@@ -420,8 +456,51 @@ function AIService:Register(brainrotId: string, model: Model)
 		P = merged
 	end
 
+	-- Variant system: read size tier and variant name from model attributes
+	-- (set by BrainrotService from the Variants config)
+	local sizeMult = model:GetAttribute("SizeMultiplier")
+	if typeof(sizeMult) ~= "number" then sizeMult = 1.0 end
+
+	local sizeTier = tostring(model:GetAttribute("SizeTier") or "normal")
+	local variantName = tostring(model:GetAttribute("VariantName") or "Normal")
+
+	-- Apply variant-specific personality overrides from BrainrotConfig.Variants
+	if brainrotEntry and type(brainrotEntry.Variants) == "table" then
+		for _, v in ipairs(brainrotEntry.Variants) do
+			if v.Name == variantName and type(v.VariantPersonalityOverrides) == "table" then
+				-- Ensure P is a mutable copy
+				local merged = {}
+				for k, val in pairs(P) do merged[k] = val end
+				for k, val in pairs(v.VariantPersonalityOverrides) do merged[k] = val end
+				P = merged
+				break
+			end
+		end
+	end
+
+	-- Size tier personality defaults (for any brainrot with variants, as fallback)
+	-- These apply if the variant didn't set explicit personality overrides for these fields
+	if sizeTier == "baby" then
+		-- Babies default to fearful behavior if variant didn't override
+		if P.Aggressive == nil or P.Aggressive > 0.10 then
+			P.Aggressive = math.min(P.Aggressive or 0.25, 0.05)
+		end
+		personalityName = "Fearful"
+	elseif sizeTier == "huge" then
+		-- Huge defaults to aggressive if variant didn't override
+		if P.Aggressive == nil or P.Aggressive < 0.50 then
+			P.Aggressive = math.max(P.Aggressive or 0.25, 0.90)
+		end
+		personalityName = "Aggressive"
+	end
+
 	local spawnPos = hrp.Position
-	local leashRadius = pNumber(P, "LeashRadius", self.Config.DefaultLeashRadius)
+
+	-- Leash radius: use personality config value, but ensure it covers at least 3/4 of territory
+	-- so brainrots in large territories aren't artificially constrained.
+	local configLeash = pNumber(P, "LeashRadius", self.Config.DefaultLeashRadius)
+	local terrSpanForLeash = terr and math.max(terr.Size.X, terr.Size.Z) * 0.75 or 45
+	local leashRadius = math.max(configLeash, terrSpanForLeash)
 
 	-- Resolve locomotion type and attack moves
 	local locoType = resolveLocomotionType(brainrotName)
@@ -466,6 +545,11 @@ function AIService:Register(brainrotId: string, model: Model)
 		ThreatLevel = 0,
 		WaitEdgeZone = nil,
 		WaitEdgeUntil = 0,
+
+		-- Size info
+		SizeTier = sizeTier,
+		SizeMultiplier = sizeMult,
+		BrainrotName = brainrotName,
 
 		Conn = {},
 	}
@@ -567,10 +651,15 @@ function AIService:_onDamaged(entry: AIEntry)
 	local P = entry.P
 	local pName = entry.PersonalityName
 
+	-- When damaged, search a MUCH larger radius — damage means you know where they are.
+	-- Scale with territory size: 1.5x territory span, minimum 3x aggro distance.
+	local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
+	local terrSpan = getTerritorySpan(entry)
+	local damageSearchRange = math.max(aggroDist * 3, terrSpan * 1.5)
+
 	-- Helper: flee from nearest player
 	local function doFlee(fearTime: number?)
-		local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
-		local plr = select(1, pickNearestPlayer(entry.HRP.Position, aggroDist))
+		local plr = select(1, pickNearestPlayer(entry.HRP.Position, damageSearchRange))
 		entry.FleeFrom = plr
 		entry.FleeUntil = now() + (fearTime or pNumber(P, "FearTime", 2.5))
 		self:_setState(entry, "Flee")
@@ -578,8 +667,7 @@ function AIService:_onDamaged(entry: AIEntry)
 
 	-- Helper: chase nearest player
 	local function doChase(): boolean
-		local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
-		local plr = select(1, pickNearestPlayer(entry.HRP.Position, aggroDist))
+		local plr = select(1, pickNearestPlayer(entry.HRP.Position, damageSearchRange))
 		if plr then
 			entry.Target = plr
 			self:_setState(entry, "Chase")
@@ -608,15 +696,15 @@ function AIService:_onDamaged(entry: AIEntry)
 		return
 	end
 
-	-- Territorial: inside territory = always attack, outside = return to territory
+	-- Territorial: ALWAYS retaliate when damaged (damage is damage, range doesn't matter).
+	-- Territory position only affects pursuit tenacity, not the initial reaction.
 	if pName == "Territorial" then
-		local terr = entry.Territory
-		if terr and isInsideTerritoryXZ(terr, entry.HRP.Position) then
-			if doChase() then
-				self:_signalPack(entry, "Chase", entry.Target)
-			end
+		if doChase() then
+			self:_signalPack(entry, "Chase", entry.Target)
 		else
-			self:_setState(entry, "Return")
+			-- No player in aggro range to chase — flee briefly instead of standing idle
+			doFlee(1.5)
+			self:_signalPack(entry, "Flee")
 		end
 		return
 	end
@@ -691,6 +779,10 @@ function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?
 		radius = math.max(tSize.X, tSize.Z) * signalFrac
 	end
 
+	-- Chase join chance: neighbors aren't guaranteed to fully commit.
+	-- Closer neighbors are more likely to join. Base chance from config (default 0.6).
+	local baseJoinChance = packCfg.PackJoinChance or 0.6
+
 	-- Signal nearby brainrots in same zone
 	for _, other in pairs(self._active) do
 		if other.Id == entry.Id then continue end
@@ -699,11 +791,23 @@ function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?
 		if not other.HRP or not other.HRP.Parent then continue end
 
 		local dist = (other.HRP.Position - entry.HRP.Position).Magnitude
-		if dist <= radius then
-			if newState == "Chase" and target then
+		if dist > radius then continue end
+
+		-- Distance falloff: closer = more likely to join (100% at 0, baseJoinChance at edge)
+		local distFactor = 1 - (dist / radius) -- 1.0 at center, 0.0 at edge
+		local joinChance = baseJoinChance + (1 - baseJoinChance) * distFactor * 0.5
+
+		if newState == "Chase" and target then
+			-- Already chasing same target? Skip
+			if other.State == "Chase" and other.Target == target then continue end
+
+			if math.random() < joinChance then
 				other.Target = target
 				self:_setState(other, "Chase")
-			elseif newState == "Flee" then
+			end
+		elseif newState == "Flee" then
+			-- Flee signal is stronger — pack animals scatter together
+			if other.State ~= "Flee" then
 				other.FleeFrom = entry.FleeFrom
 				other.FleeUntil = now() + pNumber(other.P, "FearTime", 2.5)
 				self:_setState(other, "Flee")
@@ -734,6 +838,29 @@ end
 function AIService:_pickWanderPoint(entry: AIEntry): Vector3
 	local terr = entry.Territory
 	local y = territoryY(terr, entry.HRP.Position.Y)
+
+	-- Baby brainrots: 60% chance to wander toward nearest big/huge brainrot (like staying near adults)
+	if entry.SizeTier == "baby" and math.random() < 0.60 then
+		local bestDist = math.huge
+		local bestPos: Vector3? = nil
+		for _, other in pairs(self._active) do
+			if other.Id == entry.Id then continue end
+			if other.State == "Dead" then continue end
+			if other.ZoneName ~= entry.ZoneName then continue end
+			if other.SizeTier ~= "big" and other.SizeTier ~= "huge" then continue end
+			if not other.HRP or not other.HRP.Parent then continue end
+			local d = (other.HRP.Position - entry.HRP.Position).Magnitude
+			if d < bestDist then
+				bestDist = d
+				bestPos = other.HRP.Position
+			end
+		end
+		if bestPos then
+			-- Wander to a point near the big one (within 8 studs)
+			local offset = Vector3.new((math.random() - 0.5) * 16, 0, (math.random() - 0.5) * 16)
+			return Vector3.new(bestPos.X + offset.X, y, bestPos.Z + offset.Z)
+		end
+	end
 
 	if terr then
 		-- Try up to 5 times to find a point not in an exclusion zone
@@ -889,6 +1016,16 @@ function AIService:_stepOne(entry: AIEntry)
 			local near, nearDist = pickNearestPlayer(pos, aggroDist)
 			if near then
 				local aggChance = pNumber(entry.P, "Aggressive", 0.25)
+
+				-- Territorial intrusion: if the player is inside OUR territory,
+				-- aggro is near-guaranteed (0.95) regardless of base aggression
+				if entry.PersonalityName == "Territorial" and entry.Territory then
+					local thrp = getCharHRP(near)
+					if thrp and isInsideTerritoryXZ(entry.Territory, thrp.Position) then
+						aggChance = 0.95
+					end
+				end
+
 				if math.random() < aggChance then
 					-- Check if target is in exclusion zone before chasing
 					local thrp = getCharHRP(near)
@@ -899,6 +1036,8 @@ function AIService:_stepOne(entry: AIEntry)
 						else
 							entry.Target = near
 							self:_setState(entry, "Chase")
+							-- Pack animals alert nearby allies when they spot a target
+							self:_signalPack(entry, "Chase", near)
 						end
 					end
 				end
@@ -1022,29 +1161,34 @@ function AIService:_stepOne(entry: AIEntry)
 
 		local d = (thrp.Position - pos).Magnitude
 
-		-- Check chase range
-		if d > chaseRange then
-			entry.Target = nil
-			self:_setState(entry, "Return")
-			return
-		end
+		-- Recently damaged = committed to chase for at least 3 seconds (no give-up rolls)
+		local recentlyDamaged = (t - entry.LastDamagedAt) < 3.0
 
-		-- Pursuit tenacity: chance to give up chase over time
-		local tenacity = pNumber(entry.P, "PursuitTenacity", 0.5)
-		if entry.State == "Chase" and d > aggroDist then
-			-- The farther and longer the chase, the more likely to give up
-			if math.random() > tenacity then
+		-- Territory tenacity: if Territorial and inside own territory, never give up chase
+		local terrTenacity = pNumber(entry.P, "TerritoryTenacity", 0)
+		local inOwnTerritory = terrTenacity > 0 and entry.Territory
+			and isInsideTerritoryXZ(entry.Territory, pos)
+
+		-- Check chase range (scale with territory; recently damaged = commit further)
+		local entryTerrSpan = getTerritorySpan(entry)
+		local damagedChaseRange = math.max(chaseRange, entryTerrSpan * 1.5)
+		local effectiveChaseRange = recentlyDamaged and damagedChaseRange or chaseRange
+		if d > effectiveChaseRange then
+			if not inOwnTerritory then
 				entry.Target = nil
 				self:_setState(entry, "Return")
 				return
 			end
 		end
 
-		-- Territory tenacity: if Territorial and inside own territory, never give up
-		local terrTenacity = pNumber(entry.P, "TerritoryTenacity", 0)
-		if terrTenacity > 0 and entry.Territory then
-			if isInsideTerritoryXZ(entry.Territory, pos) then
-				-- Override tenacity checks — stay aggressive in own territory
+		-- Pursuit tenacity: chance to give up chase over time
+		-- Skip if recently damaged (committed) or inside own territory (territorial defense)
+		if entry.State == "Chase" and d > aggroDist and not recentlyDamaged and not inOwnTerritory then
+			local tenacity = pNumber(entry.P, "PursuitTenacity", 0.5)
+			if math.random() > tenacity then
+				entry.Target = nil
+				self:_setState(entry, "Return")
+				return
 			end
 		end
 
@@ -1070,9 +1214,10 @@ function AIService:_stepOne(entry: AIEntry)
 				)
 
 				if moveMod and moveCfg then
-					-- Apply per-brainrot move overrides
+					-- Apply per-brainrot + variant move overrides
 					local bName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
-					moveCfg = applyMoveOverrides(bName, moveName :: string, moveCfg)
+					local vName = entry.Model:GetAttribute("VariantName")
+					moveCfg = applyMoveOverrides(bName, moveName :: string, moveCfg, vName)
 
 					-- Set animation (moveConfig AnimationKey override > module default)
 					local animName = "Attack"

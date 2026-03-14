@@ -122,13 +122,16 @@ local function getRarityColor(ctx: any, rarityName: string): Color3
 end
 
 --- Collect all brainrot folders from ReplicatedStorage/Brainrots, grouped by category.
+--- Includes variant entries from BrainrotConfig (each variant = separate index card).
 --- Returns { Normal = { {folder, info, ...}, ... }, Gold = { ... }, Diamond = { ... } }
-local function collectBrainrots(): { [string]: { any } }
+local function collectBrainrots(ctx: any): { [string]: { any } }
 	local brainrotsFolder = ReplicatedStorage:FindFirstChild("Brainrots")
 	if not brainrotsFolder then
 		warn("[IndexModule] ReplicatedStorage/Brainrots not found")
 		return {}
 	end
+
+	local brainrotConfig = ctx and ctx.Config and ctx.Config.BrainrotConfig or {}
 
 	local grouped: { [string]: { any } } = {
 		Normal  = {},
@@ -142,7 +145,7 @@ local function collectBrainrots(): { [string]: { any } }
 
 		local category = folder:GetAttribute("Category") or "Normal"
 		if not grouped[category] then
-			category = "Normal" -- fallback
+			category = "Normal"
 		end
 
 		local rarity = info:GetAttribute("Rarity") or 1
@@ -154,6 +157,7 @@ local function collectBrainrots(): { [string]: { any } }
 		local iconImage = icon and icon:IsA("ImageLabel") and icon.Image or ""
 		local lockedImage = iconLocked and iconLocked:IsA("ImageLabel") and iconLocked.Image or iconImage
 
+		-- Base entry (Normal / default variant)
 		table.insert(grouped[category], {
 			key = folder.Name,
 			displayName = displayName,
@@ -161,13 +165,49 @@ local function collectBrainrots(): { [string]: { any } }
 			rarityName = getRarityName(rarity),
 			iconImage = iconImage,
 			lockedImage = lockedImage,
+			isVariant = false,
 		})
+
+		-- Add variant entries from BrainrotConfig
+		local cfgEntry = brainrotConfig[folder.Name]
+		if cfgEntry and type(cfgEntry.Variants) == "table" then
+			for _, variant in ipairs(cfgEntry.Variants) do
+				-- Skip Normal variant — already covered by the base entry
+				if variant.Name == "Normal" or not variant.Name or variant.Name == "" then
+					continue
+				end
+
+				local variantDisplayName = displayName
+				if variant.NameTag then
+					variantDisplayName = displayName .. " " .. variant.NameTag
+				else
+					variantDisplayName = displayName .. " (" .. variant.Name .. ")"
+				end
+
+				-- Variant key matches what BrainrotService sets as IndexKey
+				local variantKey = folder.Name .. ":" .. variant.Name
+
+				table.insert(grouped[category], {
+					key = variantKey,
+					displayName = variantDisplayName,
+					rarity = rarity,
+					rarityName = getRarityName(rarity),
+					iconImage = iconImage,
+					lockedImage = lockedImage,
+					isVariant = true,
+					baseFolderName = folder.Name,
+				})
+			end
+		end
 	end
 
-	-- Sort each category by rarity descending, then name ascending
+	-- Sort each category: default entries first, then by rarity ascending (least to most), then name
 	for _, list in grouped do
 		table.sort(list, function(a, b)
-			if a.rarity ~= b.rarity then return a.rarity > b.rarity end
+			-- Default (non-variant) entries always come before variants
+			if a.isVariant ~= b.isVariant then return not a.isVariant end
+			-- Then sort by rarity ascending (least to most: Common first)
+			if a.rarity ~= b.rarity then return a.rarity < b.rarity end
 			return a.displayName < b.displayName
 		end)
 	end
@@ -231,10 +271,11 @@ function IndexModule:_buildCard(data: any, discovered: boolean): TextButton
 			applyRarityGradients(container, data.rarityName)
 		end
 
-		-- ObjectValue
+		-- ObjectValue (use base folder name for variants)
 		local brainrotVal = card:FindFirstChild("Brainrot")
 		if brainrotVal and brainrotVal:IsA("ObjectValue") then
-			local folder = ReplicatedStorage:FindFirstChild("Brainrots") and ReplicatedStorage.Brainrots:FindFirstChild(data.key)
+			local folderName = data.baseFolderName or data.key
+			local folder = ReplicatedStorage:FindFirstChild("Brainrots") and ReplicatedStorage.Brainrots:FindFirstChild(folderName)
 			if folder then
 				brainrotVal.Value = folder
 			end
@@ -291,7 +332,7 @@ end
 
 function IndexModule:_populateAll()
 	local discovered = getDiscoveredSet(self._ctx)
-	local grouped = collectBrainrots()
+	local grouped = collectBrainrots(self._ctx)
 
 	-- Cache brainrot data by key for quick lookup during live swaps
 	self._brainrotData = {}
