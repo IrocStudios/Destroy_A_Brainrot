@@ -1,16 +1,32 @@
 --!strict
 -- AIService
 -- Server-side behavior controller for brainrots spawned by BrainrotService.
--- Uses PersonalityConfig to decide roam/chase/flee/attack, and sets CurrentAnimation (replicated to clients).
+-- Uses PersonalityConfig for behavior, AttackRegistry for combat moves,
+-- MovementRegistry for pathfinding locomotion, and ExclusionZoneManager
+-- for zone-aware decision-making.
+--
+-- Evaluator loop: each tick, every brainrot re-evaluates its situation
+-- (threat level, exclusion zones, target validity, attack selection).
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
+
+local ExclusionZoneManager = require(
+	ServerStorage:WaitForChild("Services"):WaitForChild("Movement"):WaitForChild("ExclusionZoneManager")
+)
+local MovementRegistry = require(
+	ServerStorage:WaitForChild("Services"):WaitForChild("Movement"):WaitForChild("MovementRegistry")
+)
+local AttackRegistry = require(
+	ServerStorage:WaitForChild("Services"):WaitForChild("Attacks"):WaitForChild("AttackRegistry")
+)
 
 type Services = { [string]: any }
 
-type AIStateName = "Idle" | "Wander" | "Chase" | "Attack" | "Flee" | "Return" | "Dead"
+type AIStateName = "Idle" | "Wander" | "Chase" | "Attack" | "Flee" | "Return" | "Dead" | "WaitAtEdge"
 
 type AIEntry = {
 	Id: string,
@@ -43,19 +59,51 @@ type AIEntry = {
 
 	WanderTarget: Vector3?,
 
+	-- New fields
+	LocomotionType: string,
+	Locomotion: any?,
+	AttackMoves: { string },
+	ThreatLevel: number,
+	WaitEdgeZone: any?,
+	WaitEdgeUntil: number,
+
 	Conn: { RBXScriptConnection },
 }
 
 local AIService = {}
 
+local DEBUG = false
+local function dprint(...)
+	if DEBUG then print("[AIService]", ...) end
+end
+
 --//////////////////////////////
 -- Config loaders
 --//////////////////////////////
 
+local _personalityConfig: any? = nil
 local function getPersonalityConfig()
+	if _personalityConfig then return _personalityConfig end
 	local shared = ReplicatedStorage:WaitForChild("Shared")
 	local cfg = shared:WaitForChild("Config")
-	return require(cfg:WaitForChild("PersonalityConfig"))
+	_personalityConfig = require(cfg:WaitForChild("PersonalityConfig"))
+	return _personalityConfig
+end
+
+local _brainrotConfig: any? = nil
+local function getBrainrotConfig()
+	if _brainrotConfig then return _brainrotConfig end
+	local shared = ReplicatedStorage:WaitForChild("Shared")
+	local cfg = shared:WaitForChild("Config")
+	local ok, mod = pcall(function()
+		return require(cfg:WaitForChild("BrainrotConfig"))
+	end)
+	if ok and type(mod) == "table" then
+		_brainrotConfig = mod
+	else
+		_brainrotConfig = {}
+	end
+	return _brainrotConfig
 end
 
 local function getTerritoriesFolder(): Folder
@@ -175,6 +223,68 @@ local function pRange(P: { [string]: any }, key: string, a: number, b: number): 
 	return a, b
 end
 
+local function pTable(P: { [string]: any }, key: string): { [string]: any }?
+	local v = P[key]
+	return type(v) == "table" and v or nil
+end
+
+--//////////////////////////////
+-- Resolve brainrot attack moves + locomotion type
+--//////////////////////////////
+
+local function resolveAttackMoves(brainrotName: string, personality: { [string]: any }): { string }
+	local bCfg = getBrainrotConfig()
+	local entry = bCfg[brainrotName]
+
+	-- Priority 1: per-brainrot override
+	if entry and type(entry.AttackMoves) == "table" and #entry.AttackMoves > 0 then
+		return entry.AttackMoves
+	end
+
+	-- Priority 2: personality default
+	local pMoves = personality.DefaultAttackMoves
+	if type(pMoves) == "table" and #pMoves > 0 then
+		return pMoves
+	end
+
+	-- Priority 3: hardcoded fallback
+	return { "BasicMelee" }
+end
+
+local function resolveLocomotionType(brainrotName: string): string
+	local bCfg = getBrainrotConfig()
+	local entry = bCfg[brainrotName]
+	if entry and type(entry.LocomotionType) == "string" and entry.LocomotionType ~= "" then
+		return entry.LocomotionType
+	end
+	return "Walk"
+end
+
+--//////////////////////////////
+-- Threat assessment
+--//////////////////////////////
+
+local function computeThreatLevel(entry: AIEntry): number
+	local hum = entry.Humanoid
+	if not hum or hum.MaxHealth <= 0 then return 0 end
+
+	local hpFrac = 1 - (hum.Health / hum.MaxHealth) -- 0=full, 1=dead
+	local recentDamage = (now() - entry.LastDamagedAt < 3) and 0.3 or 0
+
+	-- Count nearby players
+	local nearbyPlayers = 0
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local hrp = getCharHRP(plr)
+		if hrp then
+			local d = (hrp.Position - entry.HRP.Position).Magnitude
+			if d < 50 then nearbyPlayers += 1 end
+		end
+	end
+	local crowdThreat = math.min(nearbyPlayers * 0.15, 0.5)
+
+	return math.clamp(hpFrac + recentDamage + crowdThreat, 0, 1)
+end
+
 --//////////////////////////////
 -- Service
 --//////////////////////////////
@@ -205,6 +315,10 @@ function AIService:Init(services: Services)
 
 		DefaultLeashRadius = 180,
 	}
+
+	-- Init subsystems
+	MovementRegistry:Init()
+	AttackRegistry:Init()
 end
 
 function AIService:Start()
@@ -279,8 +393,14 @@ function AIService:Register(brainrotId: string, model: Model)
 		personalityName = "Passive"
 	end
 
+	local brainrotName = tostring(model:GetAttribute("BrainrotName") or "Default")
 	local spawnPos = hrp.Position
 	local leashRadius = pNumber(P, "LeashRadius", self.Config.DefaultLeashRadius)
+
+	-- Resolve locomotion type and attack moves
+	local locoType = resolveLocomotionType(brainrotName)
+	local locomotion = MovementRegistry:Get(locoType)
+	local attackMoves = resolveAttackMoves(brainrotName, P)
 
 	local entry: AIEntry = {
 		Id = brainrotId,
@@ -313,8 +433,24 @@ function AIService:Register(brainrotId: string, model: Model)
 
 		WanderTarget = nil,
 
+		-- New fields
+		LocomotionType = locoType,
+		Locomotion = locomotion,
+		AttackMoves = attackMoves,
+		ThreatLevel = 0,
+		WaitEdgeZone = nil,
+		WaitEdgeUntil = 0,
+
 		Conn = {},
 	}
+
+	-- Init locomotion
+	if locomotion and type(locomotion.Init) == "function" then
+		locomotion:Init(entry)
+	end
+
+	-- Init attack state
+	AttackRegistry:InitEntry(entry)
 
 	-- Damage reaction via health drops
 	table.insert(entry.Conn, hum.HealthChanged:Connect(function(h: number)
@@ -344,6 +480,12 @@ function AIService:Unregister(brainrotId: string)
 	local entry = self._active[brainrotId]
 	if not entry then return end
 	self._active[brainrotId] = nil
+
+	-- Cleanup locomotion
+	if entry.Locomotion and type(entry.Locomotion.Cleanup) == "function" then
+		entry.Locomotion:Cleanup(entry)
+	end
+
 	for _, c in ipairs(entry.Conn) do
 		c:Disconnect()
 	end
@@ -359,7 +501,11 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 	if state == "Idle" then
 		entry.Target = nil
 		entry.WanderTarget = nil
+		entry.WaitEdgeZone = nil
 		entry.Humanoid.WalkSpeed = 0
+		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+			entry.Locomotion:Stop(entry)
+		end
 		safeSetAnim(entry, "Idle")
 	elseif state == "Wander" then
 		entry.Target = nil
@@ -373,11 +519,18 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 	elseif state == "Return" then
 		entry.Target = nil
 		entry.WanderTarget = nil
+		entry.WaitEdgeZone = nil
 		safeSetAnim(entry, "Walk")
+	elseif state == "WaitAtEdge" then
+		entry.Humanoid.WalkSpeed = 0
+		safeSetAnim(entry, "Idle")
 	elseif state == "Dead" then
 		entry.Target = nil
 		entry.WanderTarget = nil
 		entry.Humanoid.WalkSpeed = 0
+		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+			entry.Locomotion:Stop(entry)
+		end
 		safeSetAnim(entry, "Dead")
 	end
 end
@@ -385,24 +538,37 @@ end
 function AIService:_onDamaged(entry: AIEntry)
 	if entry.State == "Dead" then return end
 
-	local attackChance = pNumber(entry.P, "AttackChance", 0.10)
-	local runChance = pNumber(entry.P, "RunWhenAttacked", pNumber(entry.P, "RunChance", 0.25))
+	local P = entry.P
+	local retaliates = P.RetaliateOnDamage
+	if retaliates == nil then retaliates = true end -- default
 
+	local retaliateChance = pNumber(P, "RetaliateAggression", pNumber(P, "AttackChance", 0.10))
+	local runChance = pNumber(P, "RunWhenAttacked", pNumber(P, "RunChance", 0.25))
+
+	-- If currently fleeing, don't re-evaluate
 	if entry.State == "Flee" and now() < entry.FleeUntil then
 		return
 	end
 
+	-- Cornered aggression: if health is low and can't easily flee, boost aggression
+	local threat = computeThreatLevel(entry)
+	if threat > 0.7 then
+		local cornered = pNumber(P, "CorneredAggression", 0.5)
+		retaliateChance = math.max(retaliateChance, cornered)
+		runChance = runChance * (1 - cornered)
+	end
+
 	if math.random() < runChance then
-		local aggroDist = pNumber(entry.P, "AggroDistance", self.Config.DefaultDetection)
+		local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
 		local plr = select(1, pickNearestPlayer(entry.HRP.Position, aggroDist))
 		entry.FleeFrom = plr
-		entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 2.5)
+		entry.FleeUntil = now() + pNumber(P, "FearTime", 2.5)
 		self:_setState(entry, "Flee")
 		return
 	end
 
-	if math.random() < attackChance then
-		local aggroDist = pNumber(entry.P, "AggroDistance", self.Config.DefaultDetection)
+	if retaliates and math.random() < retaliateChance then
+		local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
 		local plr = select(1, pickNearestPlayer(entry.HRP.Position, aggroDist))
 		if plr then
 			entry.Target = plr
@@ -414,6 +580,12 @@ end
 function AIService:_shouldReturn(entry: AIEntry): boolean
 	local terr = entry.Territory
 	local leash = entry.LeashRadius
+	local leashStrength = pNumber(entry.P, "LeashStrength", 0.7)
+
+	-- Weaker leash = chance to ignore
+	if leashStrength < 1.0 and math.random() > leashStrength then
+		return false
+	end
 
 	if terr then
 		local d = (entry.HRP.Position - terr.Position).Magnitude
@@ -429,6 +601,13 @@ function AIService:_pickWanderPoint(entry: AIEntry): Vector3
 	local y = territoryY(terr, entry.HRP.Position.Y)
 
 	if terr then
+		-- Try up to 5 times to find a point not in an exclusion zone
+		for _ = 1, 5 do
+			local p = randomPointInTerritory(terr, y)
+			if not ExclusionZoneManager:IsBlocked(p, 1) then
+				return p
+			end
+		end
 		return randomPointInTerritory(terr, y)
 	end
 
@@ -437,6 +616,81 @@ function AIService:_pickWanderPoint(entry: AIEntry): Vector3
 	local rad = math.random() * r
 	return Vector3.new(entry.SpawnPos.X + math.cos(theta) * rad, y, entry.SpawnPos.Z + math.sin(theta) * rad)
 end
+
+--//////////////////////////////
+-- Movement helpers (use locomotion module)
+--//////////////////////////////
+
+local function moveToward(entry: AIEntry, targetPos: Vector3)
+	local loco = entry.Locomotion
+	if loco and type(loco.MoveTo) == "function" then
+		loco:MoveTo(entry, targetPos)
+	else
+		-- Fallback: raw MoveTo
+		entry.Humanoid:MoveTo(targetPos)
+	end
+end
+
+local function isFlying(entry: AIEntry): boolean
+	local loco = entry.Locomotion
+	return loco and type(loco.IsFlying) == "function" and loco:IsFlying()
+end
+
+--//////////////////////////////
+-- Exclusion zone checks
+--//////////////////////////////
+
+local function checkTargetInExclusionZone(entry: AIEntry, targetPos: Vector3): (boolean, number, any?)
+	return ExclusionZoneManager:Query(targetPos)
+end
+
+function AIService:_handleExclusionZone(entry: AIEntry, targetPos: Vector3, zoneWeight: number, zone: any): boolean
+	-- Returns true if the brainrot should NOT pursue (abandon/wait)
+	local eb = pTable(entry.P, "ExclusionBehavior")
+	if not eb then return zoneWeight >= 80 end -- default: only block on high weight
+
+	local lowThreshold = tonumber(eb.LowThreshold) or 20
+	local waitAtEdge = eb.WaitAtEdge == true
+	local waitPatience = tonumber(eb.WaitPatience) or 0
+	local pushCost = tonumber(eb.PushThroughCost) or 0
+
+	-- High weight (80+): always blocked
+	if zoneWeight >= 80 then
+		if waitAtEdge and zone then
+			entry.WaitEdgeZone = zone
+			entry.WaitEdgeUntil = now() + waitPatience
+			self:_setState(entry, "WaitAtEdge")
+		else
+			entry.Target = nil
+			self:_setState(entry, "Return")
+		end
+		return true
+	end
+
+	-- Below personality threshold: ignore zone
+	if zoneWeight < lowThreshold then
+		return false
+	end
+
+	-- Medium weight: personality-based decision
+	if math.random() < pushCost then
+		return false -- push through
+	end
+
+	if waitAtEdge and zone then
+		entry.WaitEdgeZone = zone
+		entry.WaitEdgeUntil = now() + waitPatience
+		self:_setState(entry, "WaitAtEdge")
+	else
+		entry.Target = nil
+		self:_setState(entry, "Return")
+	end
+	return true
+end
+
+--//////////////////////////////
+-- Main evaluator
+--//////////////////////////////
 
 function AIService:_stepAll()
 	for id, entry in pairs(self._active) do
@@ -458,40 +712,65 @@ function AIService:_stepOne(entry: AIEntry)
 	local t = now()
 	local pos = entry.HRP.Position
 
+	-- Update threat level
+	entry.ThreatLevel = computeThreatLevel(entry)
+
 	local walkSpeed = getAttrNumber(entry.EnemyInfo, "Walkspeed", 16)
 	local runSpeed = getAttrNumber(entry.EnemyInfo, "Runspeed", walkSpeed + 6)
 
 	local attackDamage = getAttrNumber(entry.EnemyInfo, "AttackDamage", self.Config.DefaultAttackDamage)
 	local attackRange = getAttrNumber(entry.EnemyInfo, "AttackRange", self.Config.DefaultAttackRange)
-	local attackCd = getAttrNumber(entry.EnemyInfo, "AttackCooldown", self.Config.DefaultAttackCooldown)
 
 	local aggroDist = pNumber(entry.P, "AggroDistance", self.Config.DefaultDetection)
 	local chaseRange = pNumber(entry.P, "ChaseRange", self.Config.DefaultChaseRange)
 	local fearDist = pNumber(entry.P, "FearDistance", 40)
 	local runMaxDist = pNumber(entry.P, "RunMaxDistance", 150)
 
+	-- Determine effective attack range from available moves
+	local maxAttackRange = AttackRegistry:GetMaxRange(entry.AttackMoves)
+	if maxAttackRange > attackRange then
+		attackRange = maxAttackRange
+	end
+
+	-- Check if WE are in an exclusion zone (should leave ASAP)
+	local selfInZone, selfZoneWeight = ExclusionZoneManager:Query(pos)
+	if selfInZone and selfZoneWeight >= 50 then
+		-- Get out! Move toward spawn/territory
+		self:_setState(entry, "Return")
+	end
+
 	-- Return overrides neutral states
-	if entry.State ~= "Return" and entry.State ~= "Chase" and entry.State ~= "Attack" then
+	if entry.State ~= "Return" and entry.State ~= "Chase" and entry.State ~= "Attack"
+		and entry.State ~= "WaitAtEdge" then
 		if self:_shouldReturn(entry) then
 			self:_setState(entry, "Return")
 		end
 	end
 
-	-- Acquire target on proximity
-	if entry.State ~= "Flee" and entry.State ~= "Return" then
+	-- Acquire target on proximity (only in neutral states)
+	if entry.State == "Idle" or entry.State == "Wander" then
 		if not entry.Target then
-			local near = select(1, pickNearestPlayer(pos, aggroDist))
+			local near, nearDist = pickNearestPlayer(pos, aggroDist)
 			if near then
 				local aggChance = pNumber(entry.P, "Aggressive", 0.25)
 				if math.random() < aggChance then
-					entry.Target = near
-					self:_setState(entry, "Chase")
+					-- Check if target is in exclusion zone before chasing
+					local thrp = getCharHRP(near)
+					if thrp then
+						local inZone, zWeight, zone = checkTargetInExclusionZone(entry, thrp.Position)
+						if inZone and zWeight >= 80 then
+							-- Target in hard-blocked zone, don't aggro
+						else
+							entry.Target = near
+							self:_setState(entry, "Chase")
+						end
+					end
 				end
 			end
 		end
 	end
 
-	-- Flee
+	---------- FLEE ----------
 	if entry.State == "Flee" then
 		entry.Humanoid.WalkSpeed = runSpeed
 		local from = entry.FleeFrom
@@ -511,7 +790,7 @@ function AIService:_stepOne(entry: AIEntry)
 		local y = territoryY(entry.Territory, pos.Y)
 		local fleePos = Vector3.new(pos.X + away.X * step, y, pos.Z + away.Z * step)
 
-		entry.Humanoid:MoveTo(fleePos)
+		moveToward(entry, fleePos)
 		safeSetAnim(entry, "Run")
 
 		if t >= entry.FleeUntil then
@@ -520,7 +799,52 @@ function AIService:_stepOne(entry: AIEntry)
 		return
 	end
 
-	-- Return
+	---------- WAIT AT EDGE ----------
+	if entry.State == "WaitAtEdge" then
+		local target = entry.Target
+		local thrp = target and getCharHRP(target) or nil
+
+		-- Check if target left the zone
+		if thrp then
+			local inZone, zWeight = ExclusionZoneManager:Query(thrp.Position)
+			if not inZone or zWeight < 50 then
+				-- Target is out, re-engage!
+				self:_setState(entry, "Chase")
+				return
+			end
+		end
+
+		-- Check patience
+		if t >= entry.WaitEdgeUntil then
+			entry.Target = nil
+			entry.WaitEdgeZone = nil
+			self:_setState(entry, "Return")
+			return
+		end
+
+		-- Pace at edge
+		local eb = pTable(entry.P, "ExclusionBehavior")
+		local pacingRadius = (eb and tonumber(eb.PacingRadius)) or 0
+		if pacingRadius > 0 and entry.WaitEdgeZone then
+			local edgePoint = ExclusionZoneManager:GetNearestEdgePoint(
+				thrp and thrp.Position or pos, entry.WaitEdgeZone
+			)
+			local paceOffset = Vector3.new(
+				math.cos(t * 1.5) * pacingRadius,
+				0,
+				math.sin(t * 1.5) * pacingRadius
+			)
+			entry.Humanoid.WalkSpeed = walkSpeed * 0.5
+			moveToward(entry, edgePoint + paceOffset)
+			safeSetAnim(entry, "Walk")
+		else
+			entry.Humanoid.WalkSpeed = 0
+			safeSetAnim(entry, "Idle")
+		end
+		return
+	end
+
+	---------- RETURN ----------
 	if entry.State == "Return" then
 		entry.Humanoid.WalkSpeed = walkSpeed
 
@@ -533,7 +857,7 @@ function AIService:_stepOne(entry: AIEntry)
 			targetPos = Vector3.new(entry.SpawnPos.X, y, entry.SpawnPos.Z)
 		end
 
-		entry.Humanoid:MoveTo(targetPos)
+		moveToward(entry, targetPos)
 		safeSetAnim(entry, "Walk")
 
 		if terr then
@@ -548,7 +872,7 @@ function AIService:_stepOne(entry: AIEntry)
 		return
 	end
 
-	-- Chase/Attack
+	---------- CHASE / ATTACK ----------
 	if entry.State == "Chase" or entry.State == "Attack" then
 		local target = entry.Target
 		local thrp = target and getCharHRP(target) or nil
@@ -561,50 +885,122 @@ function AIService:_stepOne(entry: AIEntry)
 		end
 
 		local d = (thrp.Position - pos).Magnitude
+
+		-- Check chase range
 		if d > chaseRange then
 			entry.Target = nil
 			self:_setState(entry, "Return")
 			return
 		end
 
-		if d <= attackRange then
-			self:_setState(entry, "Attack")
-		else
-			self:_setState(entry, "Chase")
-			entry.Humanoid.WalkSpeed = runSpeed
-			entry.Humanoid:MoveTo(thrp.Position)
-			safeSetAnim(entry, "Run")
+		-- Pursuit tenacity: chance to give up chase over time
+		local tenacity = pNumber(entry.P, "PursuitTenacity", 0.5)
+		if entry.State == "Chase" and d > aggroDist then
+			-- The farther and longer the chase, the more likely to give up
+			if math.random() > tenacity then
+				entry.Target = nil
+				self:_setState(entry, "Return")
+				return
+			end
 		end
 
-		if entry.State == "Attack" then
+		-- Territory tenacity: if Territorial and inside own territory, never give up
+		local terrTenacity = pNumber(entry.P, "TerritoryTenacity", 0)
+		if terrTenacity > 0 and entry.Territory then
+			if isInsideTerritoryXZ(entry.Territory, pos) then
+				-- Override tenacity checks — stay aggressive in own territory
+			end
+		end
+
+		-- Check if target is in an exclusion zone
+		local tInZone, tZoneWeight, tZone = checkTargetInExclusionZone(entry, thrp.Position)
+		if tInZone and tZoneWeight > 0 then
+			local blocked = self:_handleExclusionZone(entry, thrp.Position, tZoneWeight, tZone)
+			if blocked then return end
+		end
+
+		-- Attack or chase
+		if d <= attackRange then
+			-- RE-EVALUATE: pick best attack move
+			self:_setState(entry, "Attack")
 			entry.Humanoid.WalkSpeed = 0
-			entry.Humanoid:Move(Vector3.zero, false)
-			safeSetAnim(entry, "Attack")
+			if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+				entry.Locomotion:Stop(entry)
+			end
 
 			if t >= entry.NextAttackAt then
-				entry.NextAttackAt = t + attackCd
-				pcall(function()
-					-- Route damage through armor first, overflow hits health
-					local armorSvc = self.Services and self.Services.ArmorService
-					if armorSvc and target then
-						local absorbed, overflow = armorSvc:DamageArmor(target, attackDamage)
-						if overflow > 0 then
-							thum:TakeDamage(overflow)
-						end
+				local moveName, moveMod, moveCfg = AttackRegistry:PickMove(
+					entry, target, d, entry.P, entry.AttackMoves
+				)
+
+				if moveMod and moveCfg then
+					-- Set animation
+					if type(moveMod.GetAnimationName) == "function" then
+						local animName = moveMod:GetAnimationName()
+						safeSetAnim(entry, animName)
 					else
-						thum:TakeDamage(attackDamage)
+						safeSetAnim(entry, "Attack")
 					end
-				end)
+
+					-- Calculate cooldown
+					local cd = moveCfg.Cooldown or self.Config.DefaultAttackCooldown
+					local effectiveMult = entry.Model:GetAttribute("EffectiveMultiplier")
+					if typeof(effectiveMult) == "number" and effectiveMult > 0 then
+						cd = cd / effectiveMult
+					end
+					entry.NextAttackAt = t + cd
+
+					-- Record usage for per-move cooldown
+					AttackRegistry:RecordUse(entry, moveName :: string)
+
+					-- Execute the attack (may yield for windup)
+					task.spawn(function()
+						moveMod:Execute(entry, target, self.Services, moveCfg)
+					end)
+				else
+					-- No valid move, fallback to basic damage
+					safeSetAnim(entry, "Attack")
+					entry.NextAttackAt = t + self.Config.DefaultAttackCooldown
+					pcall(function()
+						local armorSvc = self.Services and self.Services.ArmorService
+						if armorSvc and target then
+							local absorbed, overflow = armorSvc:DamageArmor(target, attackDamage)
+							if overflow > 0 then
+								thum:TakeDamage(overflow)
+							end
+						else
+							thum:TakeDamage(attackDamage)
+						end
+					end)
+				end
 			end
+		else
+			-- Chase
+			self:_setState(entry, "Chase")
+			entry.Humanoid.WalkSpeed = runSpeed
+			moveToward(entry, thrp.Position)
+			safeSetAnim(entry, "Run")
 		end
 
 		return
 	end
 
-	-- Idle / Wander
+	---------- IDLE / WANDER ----------
 	if entry.State == "Idle" then
 		entry.Humanoid.WalkSpeed = 0
-		safeSetAnim(entry, "Idle")
+
+		-- Flying entities circle instead of standing
+		if isFlying(entry) and entry.Locomotion then
+			local center = entry.Territory and entry.Territory.Position or entry.SpawnPos
+			if type(entry.Locomotion.Circle) == "function" then
+				entry.Locomotion:Circle(entry, center, self.Config.TickRate)
+				safeSetAnim(entry, "Walk")
+			else
+				safeSetAnim(entry, "Idle")
+			end
+		else
+			safeSetAnim(entry, "Idle")
+		end
 
 		if t >= entry.NextThinkAt then
 			local actions = entry.P.IdleActions
@@ -632,13 +1028,15 @@ function AIService:_stepOne(entry: AIEntry)
 			entry.WanderTarget = self:_pickWanderPoint(entry)
 		end
 
-		local d = (entry.WanderTarget - pos).Magnitude
-		if d <= 3 then
+		local dXZ = math.sqrt(
+			(entry.WanderTarget.X - pos.X)^2 + (entry.WanderTarget.Z - pos.Z)^2
+		)
+		if dXZ <= 3 then
 			local lo, hi = pRange(entry.P, "WanderPause", self.Config.DefaultWanderPauseMin, self.Config.DefaultWanderPauseMax)
 			entry.NextThinkAt = t + randRange(lo, hi)
 			self:_setState(entry, "Idle")
 		else
-			entry.Humanoid:MoveTo(entry.WanderTarget)
+			moveToward(entry, entry.WanderTarget)
 		end
 		return
 	end

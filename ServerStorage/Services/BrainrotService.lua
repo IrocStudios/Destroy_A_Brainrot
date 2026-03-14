@@ -9,6 +9,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
 
+local ExclusionZoneManager = require(ServerStorage:WaitForChild("Services"):WaitForChild("Movement"):WaitForChild("ExclusionZoneManager"))
+
 type Services = { [string]: any }
 
 type ZoneRuntime = {
@@ -277,6 +279,84 @@ local function rarityNameFromNumber(n: number): string
 		or "Common"
 end
 
+----------------------------------------------------------------------
+-- BrainrotConfig loader (for SizeVariation, AttackMoves, etc.)
+----------------------------------------------------------------------
+
+local _brainrotConfig: { [string]: any }? = nil
+local function getBrainrotConfig(): { [string]: any }
+	if _brainrotConfig then return _brainrotConfig end
+	local shared = ReplicatedStorage:WaitForChild("Shared")
+	local cfg = shared:WaitForChild("Config")
+	local ok, mod = pcall(function()
+		return require(cfg:WaitForChild("BrainrotConfig"))
+	end)
+	if ok and type(mod) == "table" then
+		_brainrotConfig = mod
+		return mod
+	end
+	_brainrotConfig = {}
+	return _brainrotConfig :: { [string]: any }
+end
+
+----------------------------------------------------------------------
+-- Size variation
+----------------------------------------------------------------------
+
+local function rollSizeMultiplier(brainrotName: string): (number, number, boolean)
+	local config = getBrainrotConfig()
+	local entry = config[brainrotName]
+	if not entry or type(entry.SizeVariation) ~= "table" then
+		return 1.0, 1.0, false -- sizeMultiplier, effectiveMultiplier, inverted
+	end
+
+	local sv = entry.SizeVariation
+	local dist = sv.Distribution
+	local inverted = (sv.Inverted == true)
+
+	if type(dist) ~= "table" or #dist == 0 then
+		return 1.0, 1.0, inverted
+	end
+
+	-- Weighted bucket pick
+	local totalWeight = 0
+	for _, bucket in ipairs(dist) do
+		totalWeight += (tonumber(bucket.Weight) or 0)
+	end
+	if totalWeight <= 0 then
+		return 1.0, 1.0, inverted
+	end
+
+	local roll = math.random() * totalWeight
+	local acc = 0
+	local chosenRange = { 1.0, 1.0 }
+	for _, bucket in ipairs(dist) do
+		acc += (tonumber(bucket.Weight) or 0)
+		if roll <= acc then
+			if type(bucket.Range) == "table" and #bucket.Range >= 2 then
+				chosenRange = bucket.Range
+			end
+			break
+		end
+	end
+
+	local lo = tonumber(chosenRange[1]) or 1.0
+	local hi = tonumber(chosenRange[2]) or lo
+	if hi < lo then hi = lo end
+
+	local sizeMult = lo + math.random() * (hi - lo)
+	sizeMult = math.floor(sizeMult * 100 + 0.5) / 100 -- round to 2 decimals
+
+	local effectiveMult: number
+	if inverted then
+		effectiveMult = 1 / sizeMult
+	else
+		effectiveMult = sizeMult
+	end
+
+	return sizeMult, effectiveMult, inverted
+end
+
 local function randomPointInTerritory(territory: BasePart): Vector3
 	local cf = territory.CFrame
 	local size = territory.Size
@@ -286,17 +366,47 @@ local function randomPointInTerritory(territory: BasePart): Vector3
 	return Vector3.new(p.X, territory.Position.Y, p.Z)
 end
 
-local function findSafeSpawnPoint(territory: BasePart, tries: number): Vector3
+local function findSafeSpawnPoint(territory: BasePart, tries: number, boxSize: Vector3?): Vector3
+	local checkSize = boxSize or Vector3.new(6, 10, 6)
+
+	-- Exclude: territory zone folder, existing enemies, and exclusion zone parts
+	local excludeList: { Instance } = {}
+	if territory.Parent then
+		table.insert(excludeList, territory.Parent)
+	end
+	local enemiesFolder = Workspace:FindFirstChild("Enemies")
+	if enemiesFolder then
+		table.insert(excludeList, enemiesFolder)
+	end
+	-- Exclusion zone parts should not block the overlap check (they're non-collidable
+	-- invisible volumes), but we reject points inside them separately below.
+
 	local params = OverlapParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = { territory.Parent }
+	params.FilterDescendantsInstances = excludeList
 
-	for _ = 1, tries do
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = excludeList
+
+	for attempt = 1, tries do
 		local p = randomPointInTerritory(territory)
-		local boxCF = CFrame.new(p)
-		local boxSize = Vector3.new(6, 10, 6)
 
-		local hits = Workspace:GetPartBoundsInBox(boxCF, boxSize, params)
+		-- Reject if inside any exclusion zone (regardless of weight)
+		if ExclusionZoneManager:IsBlocked(p, 1) then
+			continue
+		end
+
+		-- Downward raycast to find ground surface
+		local rayOrigin = Vector3.new(p.X, p.Y + 50, p.Z)
+		local rayResult = Workspace:Raycast(rayOrigin, Vector3.new(0, -200, 0), rayParams)
+		if rayResult then
+			p = Vector3.new(p.X, rayResult.Position.Y + checkSize.Y * 0.5, p.Z)
+		end
+
+		-- Overlap check: ensure no collidable geometry at spawn point
+		local boxCF = CFrame.new(p)
+		local hits = Workspace:GetPartBoundsInBox(boxCF, checkSize, params)
 		local blocked = false
 		for _, part in ipairs(hits) do
 			if part.CanCollide and part.Transparency < 1 then
@@ -309,6 +419,23 @@ local function findSafeSpawnPoint(territory: BasePart, tries: number): Vector3
 		end
 	end
 
+	-- Fallback: try territory edge points instead of center
+	local terrCF = territory.CFrame
+	local terrSize = territory.Size
+	local edges = {
+		(terrCF * CFrame.new(terrSize.X * 0.4, 0, 0)).Position,
+		(terrCF * CFrame.new(-terrSize.X * 0.4, 0, 0)).Position,
+		(terrCF * CFrame.new(0, 0, terrSize.Z * 0.4)).Position,
+		(terrCF * CFrame.new(0, 0, -terrSize.Z * 0.4)).Position,
+	}
+	for _, ep in ipairs(edges) do
+		if not ExclusionZoneManager:IsBlocked(ep, 1) then
+			return ep
+		end
+	end
+
+	-- Last resort: territory center (better than nil)
+	dwarn("findSafeSpawnPoint exhausted all options for", territory:GetFullName())
 	return Vector3.new(territory.Position.X, territory.Position.Y, territory.Position.Z)
 end
 
@@ -363,6 +490,7 @@ function BrainrotService:Init(services: Services)
 	self.Services = services
 	self.TerritoriesFolder = Workspace:WaitForChild("Territories") :: Folder
 	ensureEnemiesFolder()
+	ExclusionZoneManager:Init()
 end
 
 function BrainrotService:Start()
@@ -524,7 +652,11 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 	local brainrotName = weightedPick(zoneRt.EnemyWeights)
 	local guid = HttpService:GenerateGUID(false)
 
-	dprint("Spawning brainrot:", "Name=", brainrotName, "Zone=", zoneRt.Name, "Id=", guid)
+	-- Roll size variation
+	local sizeMult, effectiveMult, sizeInverted = rollSizeMultiplier(brainrotName)
+
+	dprint("Spawning brainrot:", "Name=", brainrotName, "Zone=", zoneRt.Name, "Id=", guid,
+		"Size=", sizeMult, "Effective=", effectiveMult, "Inverted=", sizeInverted)
 
 	local model = template:Clone()
 	model.Name = ("Brainrot_%s"):format(guid)
@@ -533,27 +665,91 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 	model:SetAttribute("BrainrotName", brainrotName)
 	model:SetAttribute("ZoneName", zoneRt.Name)
 	model:SetAttribute("IsDead", false)
+	model:SetAttribute("SizeMultiplier", sizeMult)
+	model:SetAttribute("EffectiveMultiplier", effectiveMult)
+	model:SetAttribute("SizeInverted", sizeInverted)
 
 	local currentAnim = ensureCurrentAnimation(model)
 	currentAnim.Value = "Idle"
 
 	local hum, hrp = getHumanoidAndHRP(model)
 
-	local spawnPos = findSafeSpawnPoint(zoneRt.Territory, 18)
+	-- Compute spawn box size based on brainrot's actual size (scaled)
+	local baseBoxSize = Vector3.new(6, 10, 6)
+	local spawnBoxSize = baseBoxSize * sizeMult
+	local spawnPos = findSafeSpawnPoint(zoneRt.Territory, 30, spawnBoxSize)
 	model:PivotTo(CFrame.new(spawnPos))
 
 	local maxHealth, totalValue, rarityName = self:_applyBaseline(model, brainrotName)
 
+	-- Apply size scaling to stats
+	if sizeMult ~= 1.0 then
+		-- Scale model physically
+		pcall(function()
+			model:ScaleTo(sizeMult)
+		end)
+
+		-- Scale stats by effective multiplier
+		maxHealth = math.floor(maxHealth * effectiveMult + 0.5)
+		hum.MaxHealth = maxHealth
+		hum.Health = maxHealth
+
+		totalValue = math.floor(totalValue * effectiveMult + 0.5)
+
+		-- Scale attack damage and cooldown on EnemyInfo
+		local enemyInfo = model:FindFirstChild("EnemyInfo")
+		if enemyInfo and enemyInfo:IsA("Configuration") then
+			local baseDmg = enemyInfo:GetAttribute("AttackDamage")
+			if typeof(baseDmg) == "number" then
+				enemyInfo:SetAttribute("AttackDamage", math.floor(baseDmg * effectiveMult + 0.5))
+			end
+
+			local baseCd = enemyInfo:GetAttribute("AttackCooldown")
+			if typeof(baseCd) == "number" then
+				enemyInfo:SetAttribute("AttackCooldown", baseCd / effectiveMult)
+			end
+
+			-- Scale movement speed: bigger = slightly slower (physical, not inverted)
+			-- Uses S^0.3 so a 1.8x brainrot is ~17% slower, not 80%
+			local speedScale = 1 / (sizeMult ^ 0.3)
+			local baseWalk = enemyInfo:GetAttribute("Walkspeed")
+			if typeof(baseWalk) == "number" then
+				enemyInfo:SetAttribute("Walkspeed", math.floor(baseWalk * speedScale * 100 + 0.5) / 100)
+			end
+			local baseRun = enemyInfo:GetAttribute("Runspeed")
+			if typeof(baseRun) == "number" then
+				enemyInfo:SetAttribute("Runspeed", math.floor(baseRun * speedScale * 100 + 0.5) / 100)
+			end
+
+			-- Update Price for value payout
+			enemyInfo:SetAttribute("Price", totalValue)
+		end
+
+		dprint("Size-scaled stats:", brainrotName, "HP=", maxHealth, "Value=", totalValue,
+			"SizeMult=", sizeMult, "EffMult=", effectiveMult)
+	end
+
+	-- Resize HRP to match body (after scaling)
 	do
 		local bodyTemplate = getBodyTemplate(brainrotName)
 		if bodyTemplate then
-			local extents = computeBodyExtentsSize(bodyTemplate)
-			if extents then
+			local customSize = bodyTemplate:GetAttribute("CustomSize")
+			local finalSize: Vector3? = nil
+			if typeof(customSize) == "Vector3" then
+				finalSize = customSize * sizeMult
+				dprint("Using CustomSize for", brainrotName, "->", tostring(finalSize))
+			else
+				finalSize = computeBodyExtentsSize(bodyTemplate)
+				if finalSize then
+					finalSize = finalSize * sizeMult
+				end
+			end
+			if finalSize then
 				local okSize = pcall(function()
-					hrp.Size = extents
+					hrp.Size = finalSize
 				end)
 				if okSize then
-					dprint("Resized HRP:", model.Name, "->", tostring(extents))
+					dprint("Resized HRP:", model.Name, "->", tostring(finalSize))
 				end
 			end
 		end

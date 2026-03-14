@@ -1,39 +1,76 @@
 -- ReplicatedStorage/Shared/Config/PersonalityConfig.lua
 -- Data-only personality definitions used by AIService.
 -- All fields are OPTIONAL; AIService supplies safe defaults.
+--
+-- Combat fields (new):
+--   DefaultAttackMoves: fallback move list if BrainrotConfig doesn't specify
+--   PreferRanged: 0=always melee, 1=always ranged when both available
+--   HeavyAttackBias: chance to pick heavy over light when both valid
+--   RetaliateOnDamage: whether this personality fights back when hit
+--   RetaliateAggression: chance to retaliate vs flee when hit
+--   PursuitTenacity: how long it chases (0=gives up fast, 1=relentless)
+--   CorneredAggression: aggression boost when health low + can't flee
+--   TerritoryTenacity: relentlessness inside own territory (Territorial only)
+--   LeashStrength: how strongly it obeys leash radius (0=ignores, 1=strict)
+--
+-- ExclusionBehavior (new):
+--   LowThreshold: ignores zones below this weight
+--   WaitAtEdge: parks at zone boundary when blocked
+--   WaitPatience: seconds to wait before abandoning
+--   PushThroughCost: willingness to enter medium-weight zones (0=never, 1=always)
+--   PacingRadius: how far to pace while waiting at edge
 
 local PersonalityConfig = {
 
-	-- Calm, mostly wanders, usually flees when attacked.
+	----------------------------------------------------------------------
+	-- Passive: calm, mostly wanders, retaliates if attacked
+	----------------------------------------------------------------------
 	Passive = {
 		IdleFrequency = { 2, 10 },
 		IdleActions = { "idle", "walk" },
 
-		-- Aggro / attack behavior
-		Aggressive = 0.10,        -- chance to become aggressive when a player is nearby
-		AggroDistance = 45,       -- distance to consider aggro checks
-		ChaseRange = 90,          -- how far it will chase a target before giving up
-		AttackChance = 0.05,      -- chance to respond to being damaged by becoming aggressive
+		Aggressive = 0.10,
+		AggroDistance = 45,
+		ChaseRange = 90,
+		AttackChance = 0.05,
 
-		-- Flee behavior
-		RunChance = 0.60,         -- general run response chance on damage
-		RunWhenAttacked = 0.60,   -- explicit (AI prefers this if present)
-		FearTime = 3.0,           -- seconds it runs before returning
-		FearDistance = 45,        -- "step away" target distance (used as run step)
-		RunMaxDistance = 120,     -- cap flee step distance
+		RunChance = 0.60,
+		RunWhenAttacked = 0.60,
+		FearTime = 3.0,
+		FearDistance = 45,
+		RunMaxDistance = 120,
 
-		-- Territory / roaming
-		LeashRadius = 170,        -- how far from territory center/spawn before forced Return
-		PatrolRadius = 28,        -- fallback when no Territory exists
+		LeashRadius = 170,
+		PatrolRadius = 28,
 		WanderPause = { 0.8, 2.2 },
 
-		-- Optional forgiveness knobs (reserved for later expansion)
 		Forgive = 0.80,
 		ForgiveTime = 10,
 		ForgiveDistance = 50,
+
+		-- Combat defaults
+		DefaultAttackMoves = { "BasicMelee" },
+		PreferRanged = 0.0,
+		HeavyAttackBias = 0.1,
+		RetaliateOnDamage = true,
+		RetaliateAggression = 0.45,
+		PursuitTenacity = 0.2,
+		CorneredAggression = 0.7,
+		LeashStrength = 0.7,
+
+		-- Exclusion zone behavior
+		ExclusionBehavior = {
+			LowThreshold = 20,
+			WaitAtEdge = false,
+			WaitPatience = 0,
+			PushThroughCost = 0.15,
+			PacingRadius = 0,
+		},
 	},
 
-	-- Will almost always run; very unlikely to chase or attack.
+	----------------------------------------------------------------------
+	-- Fearful: always runs, only attacks if cornered
+	----------------------------------------------------------------------
 	Fearful = {
 		IdleFrequency = { 2.5, 12 },
 		IdleActions = { "idle", "walk" },
@@ -56,9 +93,30 @@ local PersonalityConfig = {
 		Forgive = 0.95,
 		ForgiveTime = 8,
 		ForgiveDistance = 60,
+
+		-- Combat defaults
+		DefaultAttackMoves = { "BasicMelee" },
+		PreferRanged = 0.8,
+		HeavyAttackBias = 0.05,
+		RetaliateOnDamage = false,
+		RetaliateAggression = 0.08,
+		PursuitTenacity = 0.0,
+		CorneredAggression = 0.9,
+		LeashStrength = 0.5,
+
+		-- Exclusion zone behavior
+		ExclusionBehavior = {
+			LowThreshold = 10,
+			WaitAtEdge = false,
+			WaitPatience = 0,
+			PushThroughCost = 0.05,
+			PacingRadius = 0,
+		},
 	},
 
-	-- Likes to fight; often aggroes when near and usually attacks when damaged.
+	----------------------------------------------------------------------
+	-- Aggressive: likes to fight, chases hard, pushes into zones
+	----------------------------------------------------------------------
 	Aggressive = {
 		IdleFrequency = { 1.2, 4.5 },
 		IdleActions = { "walk", "walk", "idle" },
@@ -81,9 +139,30 @@ local PersonalityConfig = {
 		Forgive = 0.35,
 		ForgiveTime = 16,
 		ForgiveDistance = 45,
+
+		-- Combat defaults
+		DefaultAttackMoves = { "BasicMelee", "HeavyMelee" },
+		PreferRanged = 0.3,
+		HeavyAttackBias = 0.4,
+		RetaliateOnDamage = true,
+		RetaliateAggression = 0.90,
+		PursuitTenacity = 0.75,
+		CorneredAggression = 0.95,
+		LeashStrength = 0.4,
+
+		-- Exclusion zone behavior
+		ExclusionBehavior = {
+			LowThreshold = 35,
+			WaitAtEdge = true,
+			WaitPatience = 12,
+			PushThroughCost = 0.6,
+			PacingRadius = 8,
+		},
 	},
 
-	-- Short fuse: often aggroes, but leash is tighter and returns quickly.
+	----------------------------------------------------------------------
+	-- Territorial: protects its area, tight leash, unlikely to chase outside
+	----------------------------------------------------------------------
 	Territorial = {
 		IdleFrequency = { 1.8, 6.0 },
 		IdleActions = { "walk", "idle" },
@@ -99,16 +178,38 @@ local PersonalityConfig = {
 		FearDistance = 28,
 		RunMaxDistance = 90,
 
-		LeashRadius = 140, -- tight leash
+		LeashRadius = 140,
 		PatrolRadius = 26,
 		WanderPause = { 0.6, 1.4 },
 
 		Forgive = 0.55,
 		ForgiveTime = 10,
 		ForgiveDistance = 40,
+
+		-- Combat defaults
+		DefaultAttackMoves = { "BasicMelee", "HeavyMelee" },
+		PreferRanged = 0.2,
+		HeavyAttackBias = 0.5,
+		RetaliateOnDamage = true,
+		RetaliateAggression = 0.80,
+		PursuitTenacity = 0.4,
+		TerritoryTenacity = 1.0,
+		CorneredAggression = 0.85,
+		LeashStrength = 0.95,
+
+		-- Exclusion zone behavior
+		ExclusionBehavior = {
+			LowThreshold = 25,
+			WaitAtEdge = true,
+			WaitPatience = 5,
+			PushThroughCost = 0.2,
+			PacingRadius = 6,
+		},
 	},
 
-	-- Random energy: idles less, wanders more, sometimes runs even if not needed.
+	----------------------------------------------------------------------
+	-- Jumpy: random energy, idles less, wanders more, unpredictable
+	----------------------------------------------------------------------
 	Jumpy = {
 		IdleFrequency = { 0.9, 3.5 },
 		IdleActions = { "walk", "walk", "idle" },
@@ -131,9 +232,30 @@ local PersonalityConfig = {
 		Forgive = 0.85,
 		ForgiveTime = 9,
 		ForgiveDistance = 55,
+
+		-- Combat defaults
+		DefaultAttackMoves = { "BasicMelee", "HitAndRun" },
+		PreferRanged = 0.4,
+		HeavyAttackBias = 0.2,
+		RetaliateOnDamage = true,
+		RetaliateAggression = 0.50,
+		PursuitTenacity = 0.35,
+		CorneredAggression = 0.7,
+		LeashStrength = 0.6,
+
+		-- Exclusion zone behavior
+		ExclusionBehavior = {
+			LowThreshold = 20,
+			WaitAtEdge = false,
+			WaitPatience = 3,
+			PushThroughCost = 0.3,
+			PacingRadius = 12,
+		},
 	},
 
-	-- Rarely aggroes on proximity, but if damaged it may retaliate or flee (coinflip-ish).
+	----------------------------------------------------------------------
+	-- Skittish: rarely aggroes, but may retaliate or flee (coinflip)
+	----------------------------------------------------------------------
 	Skittish = {
 		IdleFrequency = { 2.0, 9.0 },
 		IdleActions = { "idle", "walk" },
@@ -156,9 +278,30 @@ local PersonalityConfig = {
 		Forgive = 0.90,
 		ForgiveTime = 8,
 		ForgiveDistance = 60,
+
+		-- Combat defaults
+		DefaultAttackMoves = { "BasicMelee" },
+		PreferRanged = 0.5,
+		HeavyAttackBias = 0.15,
+		RetaliateOnDamage = true,
+		RetaliateAggression = 0.35,
+		PursuitTenacity = 0.15,
+		CorneredAggression = 0.6,
+		LeashStrength = 0.65,
+
+		-- Exclusion zone behavior
+		ExclusionBehavior = {
+			LowThreshold = 15,
+			WaitAtEdge = false,
+			WaitPatience = 2,
+			PushThroughCost = 0.1,
+			PacingRadius = 0,
+		},
 	},
 
-	-- Always looking for a fight; long chase range, almost never flees.
+	----------------------------------------------------------------------
+	-- Berserk: always looking for a fight, almost never flees, ignores zones
+	----------------------------------------------------------------------
 	Berserk = {
 		IdleFrequency = { 0.8, 2.8 },
 		IdleActions = { "walk", "walk", "walk", "idle" },
@@ -181,6 +324,25 @@ local PersonalityConfig = {
 		Forgive = 0.10,
 		ForgiveTime = 22,
 		ForgiveDistance = 40,
+
+		-- Combat defaults
+		DefaultAttackMoves = { "BasicMelee", "HeavyMelee" },
+		PreferRanged = 0.1,
+		HeavyAttackBias = 0.6,
+		RetaliateOnDamage = true,
+		RetaliateAggression = 1.0,
+		PursuitTenacity = 0.95,
+		CorneredAggression = 1.0,
+		LeashStrength = 0.2,
+
+		-- Exclusion zone behavior
+		ExclusionBehavior = {
+			LowThreshold = 50,
+			WaitAtEdge = true,
+			WaitPatience = 20,
+			PushThroughCost = 0.85,
+			PacingRadius = 10,
+		},
 	},
 }
 
