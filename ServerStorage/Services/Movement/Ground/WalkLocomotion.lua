@@ -145,6 +145,11 @@ end
 function WalkLocomotion:Stop(entry: any)
 	local hum: Humanoid = entry.Humanoid
 	if hum then
+		-- Cancel pending MoveTo by walking to current position, then clear MoveDirection
+		local hrp = entry.HRP
+		if hrp then
+			pcall(function() hum:MoveTo(hrp.Position) end)
+		end
 		hum:Move(Vector3.zero, false)
 	end
 	local state = getState(entry)

@@ -75,6 +75,8 @@ local BrainrotConfig = {
 			RetaliateAggression = 0.10, -- almost always flees when hit
 			PursuitTenacity = 0.0,
 			CorneredAggression = 0.3,  -- even cornered, tries to flee
+			TerritoryLeashPct = 0.0,  -- cannot leave territory at all
+			LeashStrength = 1.0,
 		},
 
 		-- Override StandAndHurl range, projectile, accuracy, and cooldown for this brainrot
@@ -191,7 +193,8 @@ local BrainrotConfig = {
 			PursuitTenacity = 0.90,    -- very persistent chaser
 			HeavyAttackBias = 0.35,    -- sometimes uses heavy melee
 			CorneredAggression = 1.0,
-			LeashStrength = 0.3,       -- will leave territory to chase
+			TerritoryLeashPct = 0.30,  -- 30% beyond territory edge
+			LeashStrength = 0.3,       -- weak pull back (will chase far)
 		},
 
 		MoveOverrides = {
@@ -262,7 +265,8 @@ local BrainrotConfig = {
 			PursuitTenacity = 0.70,    -- commits to chase (was 0.45 — too low)
 			HeavyAttackBias = 0.20,    -- ~20% charge/trample, ~80% scratch
 			CorneredAggression = 0.90,
-			LeashStrength = 0.60,      -- willing to leave territory to pursue
+			TerritoryLeashPct = 0.10,  -- short leash (10% beyond edge)
+			LeashStrength = 0.60,      -- moderate pull (but pursuit bypasses leash check)
 		},
 
 		MoveOverrides = {
@@ -401,6 +405,8 @@ local BrainrotConfig = {
 			PursuitTenacity = 0.0,    -- never pursues
 			CorneredAggression = 0.15, -- even cornered, tries to flee
 			FleeStyle = "scatter",    -- scatter in random directions
+			TerritoryLeashPct = 0.10,  -- 10% beyond territory edge
+			LeashStrength = 0.90,      -- strong pull back after flee
 		},
 
 		MoveOverrides = {

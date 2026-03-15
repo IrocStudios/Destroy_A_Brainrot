@@ -261,7 +261,7 @@ function BrainrotClient:_playAnimByName(entry: ActiveEntry, animName: string)
 		dprint("Loaded track:", animObj.Name, "len=", track.Length, "id=", animObj.AnimationId, "model=", entry.Model.Name)
 	end
 
-	if entry.LastPlayedAnimName == animObj.Name and track.IsPlaying then
+	if lowerKey(entry.LastPlayedAnimName or "") == lowerKey(animObj.Name) and track.IsPlaying then
 		return
 	end
 
@@ -272,6 +272,10 @@ function BrainrotClient:_playAnimByName(entry: ActiveEntry, animName: string)
 			end)
 		end
 	end
+
+	-- Ensure all tracks loop so they don't stop on their own
+	-- (prevents Walk showing through after a non-looping Idle finishes)
+	track.Looped = true
 
 	entry.LastPlayedAnimName = animObj.Name
 	dprint("Playing anim:", animObj.Name, "requested:", animName, "model=", entry.Model.Name)
@@ -517,6 +521,12 @@ function BrainrotClient:_updateRange()
 			local d = (myHRP.Position - entry.HRP.Position).Magnitude
 			if d <= self.RenderDistance then
 				self:_attach(entry)
+				-- Periodic animation sync: force-refresh to catch missed Changed
+				-- signals, stopped tracks, or case mismatches. The dedup inside
+				-- _playAnimByName makes this a no-op when already correct.
+				if entry.Body and entry.Body.Parent then
+					self:_refreshAnim(entry)
+				end
 			else
 				self:_detach(entry)
 			end

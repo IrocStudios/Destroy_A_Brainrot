@@ -58,6 +58,7 @@ type AIEntry = {
 	FleeFrom: Player?,
 
 	WanderTarget: Vector3?,
+	ReturnTarget: Vector3?,
 
 	-- New fields
 	LocomotionType: string,
@@ -71,6 +72,10 @@ type AIEntry = {
 	SizeTier: string,
 	SizeMultiplier: number,
 	BrainrotName: string,
+	SafeZones: { BasePart },
+
+	-- Idle fidget tracking
+	ConsecutiveIdles: number, -- how many times in a row we picked "idle" action
 
 	-- Flee evasion state
 	FleeZigDir: number, -- +1 or -1, alternates for zigzag
@@ -127,6 +132,20 @@ local function getZoneTerritory(zoneName: string): BasePart?
 	return (terr and terr:IsA("BasePart")) and terr or nil
 end
 
+-- Find all SafeZone parts inside a zone folder (siblings of Territory)
+local function getZoneSafeZones(zoneName: string): { BasePart }
+	local territories = getTerritoriesFolder()
+	local zone = territories:FindFirstChild(zoneName)
+	if not zone then return {} end
+	local zones = {}
+	for _, child in ipairs(zone:GetChildren()) do
+		if child:IsA("BasePart") and child.Name == "SafeZone" then
+			table.insert(zones, child)
+		end
+	end
+	return zones
+end
+
 --//////////////////////////////
 -- Utility
 --//////////////////////////////
@@ -180,6 +199,30 @@ end
 
 local function territoryY(terr: BasePart?, fallbackY: number): number
 	return terr and terr.Position.Y or fallbackY
+end
+
+-- Pick a random point inside a SafeZone part (or near it if small)
+local function randomPointInSafeZone(safeZone: BasePart, y: number): Vector3
+	local cf = safeZone.CFrame
+	local size = safeZone.Size
+	local rx = (math.random() - 0.5) * size.X * 0.8
+	local rz = (math.random() - 0.5) * size.Z * 0.8
+	local p = (cf * CFrame.new(rx, 0, rz)).Position
+	return Vector3.new(p.X, y, p.Z)
+end
+
+-- Find the nearest SafeZone to a position
+local function nearestSafeZone(safeZones: { BasePart }, pos: Vector3): BasePart?
+	local best: BasePart? = nil
+	local bestDist = math.huge
+	for _, sz in ipairs(safeZones) do
+		local d = (sz.Position - pos).Magnitude
+		if d < bestDist then
+			bestDist = d
+			best = sz
+		end
+	end
+	return best
 end
 
 local function randomPointInTerritory(terr: BasePart, y: number): Vector3
@@ -500,11 +543,13 @@ function AIService:Register(brainrotId: string, model: Model)
 
 	local spawnPos = hrp.Position
 
-	-- Leash radius: use personality config value, but ensure it covers at least 3/4 of territory
-	-- so brainrots in large territories aren't artificially constrained.
+	-- Leash radius: territory half-diagonal + buffer %, or personality default for non-territory
+	local terrSpan = terr and math.max(terr.Size.X, terr.Size.Z) or 60
+	local leashPct = pNumber(P, "TerritoryLeashPct", 0.20)
+	local leashRadius = (terrSpan * 0.5) + (terrSpan * leashPct)
+	-- Fallback: ensure at least the personality's absolute LeashRadius
 	local configLeash = pNumber(P, "LeashRadius", self.Config.DefaultLeashRadius)
-	local terrSpanForLeash = terr and math.max(terr.Size.X, terr.Size.Z) * 0.75 or 45
-	local leashRadius = math.max(configLeash, terrSpanForLeash)
+	if not terr then leashRadius = configLeash end
 
 	-- Resolve locomotion type and attack moves
 	local locoType = resolveLocomotionType(brainrotName)
@@ -541,6 +586,7 @@ function AIService:Register(brainrotId: string, model: Model)
 		FleeFrom = nil,
 
 		WanderTarget = nil,
+		ReturnTarget = nil,
 
 		-- New fields
 		LocomotionType = locoType,
@@ -554,6 +600,8 @@ function AIService:Register(brainrotId: string, model: Model)
 		SizeTier = sizeTier,
 		SizeMultiplier = sizeMult,
 		BrainrotName = brainrotName,
+		SafeZones = getZoneSafeZones(zoneName),
+		ConsecutiveIdles = 0,
 
 		Conn = {},
 	}
@@ -615,11 +663,18 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 	if state == "Idle" then
 		entry.Target = nil
 		entry.WanderTarget = nil
+		entry.ReturnTarget = nil
 		entry.WaitEdgeZone = nil
+		entry._isFidget = nil
 		entry.Humanoid.WalkSpeed = 0
 		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
 			entry.Locomotion:Stop(entry)
 		end
+		-- Cancel any pending MoveTo so Humanoid fully stops
+		if entry.HRP then
+			pcall(function() entry.Humanoid:MoveTo(entry.HRP.Position) end)
+		end
+		entry.Humanoid:Move(Vector3.zero, false)
 		safeSetAnim(entry, "Idle")
 	elseif state == "Wander" then
 		entry.Target = nil
@@ -633,10 +688,12 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 	elseif state == "Return" then
 		entry.Target = nil
 		entry.WanderTarget = nil
+		entry.ReturnTarget = nil
 		entry.WaitEdgeZone = nil
 		safeSetAnim(entry, "Walk")
 	elseif state == "WaitAtEdge" then
 		entry.Humanoid.WalkSpeed = 0
+		entry.Humanoid:Move(Vector3.zero, false)
 		safeSetAnim(entry, "Idle")
 	elseif state == "Dead" then
 		entry.Target = nil
@@ -826,21 +883,42 @@ end
 
 function AIService:_shouldReturn(entry: AIEntry): boolean
 	local terr = entry.Territory
-	local leash = entry.LeashRadius
-	local leashStrength = pNumber(entry.P, "LeashStrength", 0.7)
 
-	-- Weaker leash = chance to ignore
-	if leashStrength < 1.0 and math.random() > leashStrength then
+	if not terr then
+		-- No territory — use spawn pos + leash (hard boundary)
+		local d = (entry.HRP.Position - entry.SpawnPos).Magnitude
+		return d > entry.LeashRadius
+	end
+
+	-- Inside territory — never return
+	if isInsideTerritoryXZ(terr, entry.HRP.Position) then
 		return false
 	end
 
-	if terr then
-		local d = (entry.HRP.Position - terr.Position).Magnitude
-		return d > leash
-	else
-		local d = (entry.HRP.Position - entry.SpawnPos).Magnitude
-		return d > leash
+	-- Calculate how far beyond the territory edge we are
+	local localPos = terr.CFrame:PointToObjectSpace(entry.HRP.Position)
+	local halfX, halfZ = terr.Size.X * 0.5, terr.Size.Z * 0.5
+	local overX = math.max(0, math.abs(localPos.X) - halfX)
+	local overZ = math.max(0, math.abs(localPos.Z) - halfZ)
+	local overshoot = math.sqrt(overX * overX + overZ * overZ)
+
+	-- Soft leash: TerritoryLeashPct = how far beyond edge (% of territory span)
+	-- Minimum 5-stud grace zone so brainrots don't ping-pong at exact boundary
+	-- due to physics drift, pathfinding overshoot, or collision nudges
+	local span = math.max(terr.Size.X, terr.Size.Z)
+	local leashPct = pNumber(entry.P, "TerritoryLeashPct", 0.20)
+	local maxBuffer = math.max(span * leashPct, 5)
+
+	-- Beyond hard leash = always return
+	if overshoot >= maxBuffer then
+		return true
 	end
+
+	-- Soft zone: return probability increases linearly with distance beyond edge
+	-- At edge: 0% chance. At max buffer: ~LeashStrength chance.
+	local leashStrength = pNumber(entry.P, "LeashStrength", 0.7)
+	local returnChance = (overshoot / maxBuffer) * leashStrength
+	return math.random() < returnChance
 end
 
 function AIService:_pickWanderPoint(entry: AIEntry): Vector3
@@ -871,9 +949,32 @@ function AIService:_pickWanderPoint(entry: AIEntry): Vector3
 	end
 
 	if terr then
+		-- SafeZone pull: ~25% chance to wander toward a SafeZone (light attraction)
+		-- Closer to SafeZone = slightly higher pull, but kept light to avoid clustering
+		if #entry.SafeZones > 0 and math.random() < 0.25 then
+			local sz = entry.SafeZones[math.random(1, #entry.SafeZones)]
+			local pt = randomPointInSafeZone(sz, y)
+			if not ExclusionZoneManager:IsBlocked(pt, 1) then
+				return pt
+			end
+		end
+
+		-- Bias wander points toward center (inner 80%) to avoid edge-hugging.
+		-- If brainrot is already near the edge, bias even more toward center.
+		local localPos = terr.CFrame:PointToObjectSpace(entry.HRP.Position)
+		local halfX, halfZ = terr.Size.X * 0.5, terr.Size.Z * 0.5
+		local edgeFrac = math.max(math.abs(localPos.X) / halfX, math.abs(localPos.Z) / halfZ)
+		-- Near center (edgeFrac<0.5): use 80% of territory. Near edge (edgeFrac>0.8): use 50%.
+		local shrink = if edgeFrac > 0.8 then 0.5 elseif edgeFrac > 0.5 then 0.65 else 0.80
+
 		-- Try up to 5 times to find a point not in an exclusion zone
 		for _ = 1, 5 do
-			local p = randomPointInTerritory(terr, y)
+			local cf = terr.CFrame
+			local size = terr.Size
+			local rx = (math.random() - 0.5) * size.X * shrink
+			local rz = (math.random() - 0.5) * size.Z * shrink
+			local pp = (cf * CFrame.new(rx, 0, rz)).Position
+			local p = Vector3.new(pp.X, y, pp.Z)
 			if not ExclusionZoneManager:IsBlocked(p, 1) then
 				return p
 			end
@@ -885,6 +986,33 @@ function AIService:_pickWanderPoint(entry: AIEntry): Vector3
 	local theta = math.random() * math.pi * 2
 	local rad = math.random() * r
 	return Vector3.new(entry.SpawnPos.X + math.cos(theta) * rad, y, entry.SpawnPos.Z + math.sin(theta) * rad)
+end
+
+-- Pick a short fidget point: 3-6 studs from current position, stays in territory
+function AIService:_pickFidgetPoint(entry: AIEntry): Vector3
+	local hrp = entry.HRP
+	local y = territoryY(entry.Territory, hrp.Position.Y)
+	local dist = 3 + math.random() * 3 -- 3-6 studs
+	local angle = math.random() * math.pi * 2
+	local target = Vector3.new(
+		hrp.Position.X + math.cos(angle) * dist,
+		y,
+		hrp.Position.Z + math.sin(angle) * dist
+	)
+	-- If we have a territory, clamp inside it
+	local terr = entry.Territory
+	if terr then
+		local localP = terr.CFrame:PointToObjectSpace(target)
+		local hx, hz = terr.Size.X * 0.45, terr.Size.Z * 0.45
+		localP = Vector3.new(
+			math.clamp(localP.X, -hx, hx),
+			localP.Y,
+			math.clamp(localP.Z, -hz, hz)
+		)
+		local world = terr.CFrame:PointToWorldSpace(localP)
+		target = Vector3.new(world.X, y, world.Z)
+	end
+	return target
 end
 
 --//////////////////////////////
@@ -968,6 +1096,7 @@ function AIService:_stepAll()
 			self._active[id] = nil
 		else
 			self:_stepOne(entry)
+			self:_velocityAnimCheck(entry)
 		end
 	end
 end
@@ -1012,7 +1141,7 @@ function AIService:_stepOne(entry: AIEntry)
 
 	-- Return overrides neutral states
 	if entry.State ~= "Return" and entry.State ~= "Chase" and entry.State ~= "Attack"
-		and entry.State ~= "WaitAtEdge" then
+		and entry.State ~= "WaitAtEdge" and entry.State ~= "Flee" then
 		if self:_shouldReturn(entry) then
 			self:_setState(entry, "Return")
 		end
@@ -1199,20 +1328,48 @@ function AIService:_stepOne(entry: AIEntry)
 
 		entry.Humanoid.WalkSpeed = walkSpeed
 
-		local terr = entry.Territory
-		local y = territoryY(terr, pos.Y)
-		local targetPos: Vector3
-		if terr then
-			targetPos = Vector3.new(terr.Position.X, y, terr.Position.Z)
-		else
-			targetPos = Vector3.new(entry.SpawnPos.X, y, entry.SpawnPos.Z)
+		-- Pick a return target: prefer SafeZone (stronger pull when damaged),
+		-- otherwise inner 60% of territory
+		if not entry.ReturnTarget then
+			local terr = entry.Territory
+			local y = territoryY(terr, pos.Y)
+			local usedSafeZone = false
+
+			-- SafeZone pull for return: 60% chance normally, 90% if recently damaged
+			if #entry.SafeZones > 0 then
+				local recentlyDamaged = (now() - entry.LastDamagedAt) < 5
+				local szChance = if recentlyDamaged then 0.90 else 0.60
+				if math.random() < szChance then
+					local sz = nearestSafeZone(entry.SafeZones, pos)
+					if sz then
+						entry.ReturnTarget = randomPointInSafeZone(sz, y)
+						usedSafeZone = true
+					end
+				end
+			end
+
+			if not usedSafeZone then
+				if terr then
+					-- Pick a point in the inner 60% of territory (toward center)
+					local cf = terr.CFrame
+					local size = terr.Size
+					local rx = (math.random() - 0.5) * size.X * 0.6
+					local rz = (math.random() - 0.5) * size.Z * 0.6
+					local p = (cf * CFrame.new(rx, 0, rz)).Position
+					entry.ReturnTarget = Vector3.new(p.X, y, p.Z)
+				else
+					entry.ReturnTarget = Vector3.new(entry.SpawnPos.X, y, entry.SpawnPos.Z)
+				end
+			end
 		end
 
-		moveToward(entry, targetPos)
+		moveToward(entry, entry.ReturnTarget)
 		safeSetAnim(entry, "Walk")
 
+		local terr = entry.Territory
 		if terr then
 			if isInsideTerritoryXZ(terr, pos) then
+				entry.ReturnTarget = nil
 				self:_setState(entry, "Idle")
 			end
 		else
@@ -1298,6 +1455,7 @@ function AIService:_stepOne(entry: AIEntry)
 			-- RE-EVALUATE: pick best attack move
 			self:_setState(entry, "Attack")
 			entry.Humanoid.WalkSpeed = 0
+			entry.Humanoid:Move(Vector3.zero, false)
 			if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
 				entry.Locomotion:Stop(entry)
 			end
@@ -1368,6 +1526,7 @@ function AIService:_stepOne(entry: AIEntry)
 	---------- IDLE / WANDER ----------
 	if entry.State == "Idle" then
 		entry.Humanoid.WalkSpeed = 0
+		entry.Humanoid:Move(Vector3.zero, false)
 
 		-- Flying entities circle instead of standing
 		if isFlying(entry) and entry.Locomotion then
@@ -1384,24 +1543,45 @@ function AIService:_stepOne(entry: AIEntry)
 
 		if t >= entry.NextThinkAt then
 			local actions = entry.P.IdleActions
-			local doWalk = true
+			local pick = "walk"
 			if type(actions) == "table" and #actions > 0 then
-				local pick = actions[math.random(1, #actions)]
-				doWalk = (tostring(pick) == "walk")
+				pick = tostring(actions[math.random(1, #actions)])
 			end
-			if doWalk then
+
+			-- Cap consecutive idles: after 2 in a row, force a fidget or walk
+			if pick == "idle" then
+				entry.ConsecutiveIdles = (entry.ConsecutiveIdles or 0) + 1
+				if entry.ConsecutiveIdles >= 2 then
+					-- Force movement: 60% fidget, 40% full wander
+					pick = if math.random() < 0.60 then "fidget" else "walk"
+					entry.ConsecutiveIdles = 0
+				end
+			else
+				entry.ConsecutiveIdles = 0
+			end
+
+			if pick == "walk" then
 				entry.WanderTarget = self:_pickWanderPoint(entry)
 				self:_setState(entry, "Wander")
+			elseif pick == "fidget" then
+				-- Short micro-movement: 3-6 studs at half walk speed
+				entry.WanderTarget = self:_pickFidgetPoint(entry)
+				entry._isFidget = true
+				self:_setState(entry, "Wander")
 			else
+				-- Stay idle, but use a shorter timer to keep things lively
 				local lo, hi = pRange(entry.P, "IdleFrequency", self.Config.DefaultIdleMin, self.Config.DefaultIdleMax)
-				entry.NextThinkAt = t + randRange(lo, hi)
+				-- Shorten idle pauses: use 40-70% of the configured range
+				entry.NextThinkAt = t + randRange(lo * 0.4, hi * 0.7)
 			end
 		end
 		return
 	end
 
 	if entry.State == "Wander" then
-		entry.Humanoid.WalkSpeed = walkSpeed
+		local isFidget = entry._isFidget
+		-- Fidgets use half walk speed for a casual shuffle
+		entry.Humanoid.WalkSpeed = if isFidget then math.max(walkSpeed * 0.5, 4) else walkSpeed
 		safeSetAnim(entry, "Walk")
 
 		if not entry.WanderTarget then
@@ -1411,14 +1591,48 @@ function AIService:_stepOne(entry: AIEntry)
 		local dXZ = math.sqrt(
 			(entry.WanderTarget.X - pos.X)^2 + (entry.WanderTarget.Z - pos.Z)^2
 		)
-		if dXZ <= 3 then
+		-- Fidgets arrive at 2 studs (shorter), normal wander at 3
+		local arrivalDist = if isFidget then 2 else 3
+		if dXZ <= arrivalDist then
+			entry._isFidget = nil
 			local lo, hi = pRange(entry.P, "WanderPause", self.Config.DefaultWanderPauseMin, self.Config.DefaultWanderPauseMax)
-			entry.NextThinkAt = t + randRange(lo, hi)
+			-- Fidgets have shorter pause after (quick settle)
+			if isFidget then
+				entry.NextThinkAt = t + randRange(lo * 0.5, hi * 0.5)
+			else
+				entry.NextThinkAt = t + randRange(lo, hi)
+			end
 			self:_setState(entry, "Idle")
 		else
 			moveToward(entry, entry.WanderTarget)
 		end
 		return
+	end
+end
+
+-- Velocity-based animation override: if the brainrot is physically not moving
+-- but has a movement animation playing, switch to Idle animation.
+-- This catches stuck-on-wall, pathfinding failure, territory edge, etc.
+local MOVE_VELOCITY_THRESHOLD = 0.5 -- studs/sec; below this = "not moving"
+
+function AIService:_velocityAnimCheck(entry: AIEntry)
+	if entry.State == "Dead" then return end
+	local hrp = entry.HRP
+	if not hrp then return end
+
+	local sv = entry.CurrentAnimation
+	if not sv then return end
+	local currentAnim = sv.Value
+
+	-- Only override movement animations (Walk, Run)
+	if currentAnim ~= "Walk" and currentAnim ~= "Run" then return end
+
+	-- Check actual velocity (XZ plane only, ignore Y for jumps/slopes)
+	local vel = hrp.AssemblyLinearVelocity
+	local xzSpeed = math.sqrt(vel.X * vel.X + vel.Z * vel.Z)
+
+	if xzSpeed < MOVE_VELOCITY_THRESHOLD then
+		safeSetAnim(entry, "Idle")
 	end
 end
 

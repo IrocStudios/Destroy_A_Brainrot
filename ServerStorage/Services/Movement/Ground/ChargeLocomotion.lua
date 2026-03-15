@@ -183,7 +183,14 @@ end
 
 function ChargeLocomotion:Stop(entry: any)
 	local hum: Humanoid = entry.Humanoid
-	if hum then hum:Move(Vector3.zero, false) end
+	if hum then
+		-- Cancel pending MoveTo by walking to current position, then clear MoveDirection
+		local hrp = entry.HRP
+		if hrp then
+			pcall(function() hum:MoveTo(hrp.Position) end)
+		end
+		hum:Move(Vector3.zero, false)
+	end
 	local state = getState(entry)
 	cleanupPath(state)
 	state.TargetPos = nil

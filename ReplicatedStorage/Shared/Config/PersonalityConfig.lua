@@ -26,8 +26,8 @@ local PersonalityConfig = {
 	-- Passive: calm, mostly wanders, retaliates if attacked
 	----------------------------------------------------------------------
 	Passive = {
-		IdleFrequency = { 2, 10 },
-		IdleActions = { "idle", "walk" },
+		IdleFrequency = { 2, 6 },
+		IdleActions = { "idle", "fidget", "walk" },
 
 		Aggressive = 0.10,
 		AggroDistance = 45,
@@ -75,8 +75,8 @@ local PersonalityConfig = {
 	-- Fearful: always runs, only attacks if cornered
 	----------------------------------------------------------------------
 	Fearful = {
-		IdleFrequency = { 2.5, 12 },
-		IdleActions = { "idle", "walk" },
+		IdleFrequency = { 2, 7 },
+		IdleActions = { "idle", "fidget", "walk" },
 
 		Aggressive = 0.03,
 		AggroDistance = 35,
@@ -124,8 +124,8 @@ local PersonalityConfig = {
 	-- Aggressive: likes to fight, chases hard, pushes into zones
 	----------------------------------------------------------------------
 	Aggressive = {
-		IdleFrequency = { 1.2, 4.5 },
-		IdleActions = { "walk", "walk", "idle" },
+		IdleFrequency = { 1.0, 3.5 },
+		IdleActions = { "walk", "walk", "fidget", "idle" },
 
 		Aggressive = 0.70,
 		AggroDistance = 75,
@@ -170,8 +170,8 @@ local PersonalityConfig = {
 	-- Territorial: protects its area, tight leash, unlikely to chase outside
 	----------------------------------------------------------------------
 	Territorial = {
-		IdleFrequency = { 1.8, 6.0 },
-		IdleActions = { "walk", "idle" },
+		IdleFrequency = { 1.5, 5.0 },
+		IdleActions = { "walk", "fidget", "idle" },
 
 		Aggressive = 0.55,
 		AggroDistance = 60,
@@ -217,8 +217,8 @@ local PersonalityConfig = {
 	-- Jumpy: random energy, idles less, wanders more, unpredictable
 	----------------------------------------------------------------------
 	Jumpy = {
-		IdleFrequency = { 0.9, 3.5 },
-		IdleActions = { "walk", "walk", "idle" },
+		IdleFrequency = { 0.8, 3.0 },
+		IdleActions = { "walk", "walk", "fidget", "idle" },
 
 		Aggressive = 0.22,
 		AggroDistance = 55,
@@ -263,8 +263,8 @@ local PersonalityConfig = {
 	-- Skittish: rarely aggroes, but may retaliate or flee (coinflip)
 	----------------------------------------------------------------------
 	Skittish = {
-		IdleFrequency = { 2.0, 9.0 },
-		IdleActions = { "idle", "walk" },
+		IdleFrequency = { 1.8, 6.0 },
+		IdleActions = { "idle", "fidget", "walk" },
 
 		Aggressive = 0.07,
 		AggroDistance = 50,
@@ -309,8 +309,8 @@ local PersonalityConfig = {
 	-- Berserk: always looking for a fight, almost never flees, ignores zones
 	----------------------------------------------------------------------
 	Berserk = {
-		IdleFrequency = { 0.8, 2.8 },
-		IdleActions = { "walk", "walk", "walk", "idle" },
+		IdleFrequency = { 0.6, 2.2 },
+		IdleActions = { "walk", "walk", "walk", "fidget" },
 
 		Aggressive = 0.90,
 		AggroDistance = 85,
