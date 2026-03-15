@@ -523,6 +523,7 @@ function BrainrotService:Start()
 		end)
 	end)
 
+	-- Spawn loop
 	task.spawn(function()
 		while self._running do
 			if not RunService:IsRunning() then
@@ -550,6 +551,99 @@ function BrainrotService:Start()
 			end
 
 			task.wait(0.25)
+		end
+	end)
+
+	-- Integrity check loop: catch fallen, broken, or orphaned brainrots
+	local VOID_Y = -50
+	local INTEGRITY_INTERVAL = 2.0 -- check every 2 seconds (not perf-critical)
+	task.spawn(function()
+		while self._running do
+			task.wait(INTEGRITY_INTERVAL)
+			if not RunService:IsRunning() then continue end
+
+			local toRemove: { string } = {}
+			for guid, rt in pairs(self.EnemiesById) do
+				local model = rt.Model
+				local hrp = rt.HRP
+				local hum = rt.Humanoid
+
+				-- Check 1: model removed from game
+				if not model or not model.Parent then
+					dprint("Integrity: model missing for", guid)
+					table.insert(toRemove, guid)
+					continue
+				end
+
+				-- Check 2: HRP destroyed/removed (model is orphaned shell)
+				if not hrp or not hrp.Parent then
+					dprint("Integrity: HRP missing for", guid, "- despawning")
+					table.insert(toRemove, guid)
+					continue
+				end
+
+				-- Check 3: Humanoid destroyed/removed
+				if not hum or not hum.Parent then
+					dprint("Integrity: Humanoid missing for", guid, "- despawning")
+					table.insert(toRemove, guid)
+					continue
+				end
+
+				-- Check 4: fell through map
+				if hrp.Position.Y < VOID_Y then
+					-- Try to recover: teleport back to territory
+					local zoneName = rt.ZoneName
+					local zoneRt = self.Zones[zoneName]
+					if zoneRt and zoneRt.Territory and hum.Health > 0 then
+						local terr = zoneRt.Territory
+						local spawnY = terr.Position.Y + terr.Size.Y * 0.5 + 3
+						local spawnPos = Vector3.new(
+							terr.Position.X + (math.random() - 0.5) * terr.Size.X * 0.5,
+							spawnY,
+							terr.Position.Z + (math.random() - 0.5) * terr.Size.Z * 0.5
+						)
+						dprint("Integrity: fell through map, recovering", guid, "to", tostring(spawnPos))
+						pcall(function()
+							model:PivotTo(CFrame.new(spawnPos))
+							hrp.AssemblyLinearVelocity = Vector3.zero
+						end)
+					else
+						-- Can't recover (no territory or already dead) — despawn
+						dprint("Integrity: fell through map, can't recover", guid, "- despawning")
+						table.insert(toRemove, guid)
+					end
+				end
+			end
+
+			-- Process removals outside iteration
+			for _, guid in ipairs(toRemove) do
+				self:Despawn(guid, "integrity")
+			end
+		end
+	end)
+
+	-- Cleanup loop: remove orphaned models from Enemies folder that aren't tracked
+	task.spawn(function()
+		task.wait(5) -- initial delay to let spawns finish
+		while self._running do
+			task.wait(10) -- check every 10 seconds
+			if not RunService:IsRunning() then continue end
+
+			local enemiesFolder = Workspace:FindFirstChild("Enemies")
+			if not enemiesFolder then continue end
+
+			for _, child in ipairs(enemiesFolder:GetChildren()) do
+				local guid = child:GetAttribute("BrainrotId")
+				if guid and not self.EnemiesById[guid] then
+					-- Orphaned model: tracked ID but no runtime entry
+					dprint("Cleanup: orphaned model", child.Name, "guid=", guid)
+					child:Destroy()
+				elseif not guid then
+					-- No ID at all — shouldn't be in Enemies folder
+					dprint("Cleanup: untracked model", child.Name)
+					child:Destroy()
+				end
+			end
 		end
 	end)
 end
@@ -804,6 +898,29 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 	end
 
 	model.Parent = enemiesFolder
+
+	-- Create a dedicated collision block welded to HRP.
+	-- Roblox's Humanoid auto-manages CanCollide on character parts (resets to false),
+	-- but this separate part is NOT a Humanoid limb, so it stays CanCollide=true permanently.
+	-- CanQuery/CanTouch=false means raycasts (combat hitbox) ignore it — physics only.
+	if hrp then
+		local collider = Instance.new("Part")
+		collider.Name = "CollisionBlock"
+		collider.Size = hrp.Size -- match HRP dimensions (already scaled)
+		collider.Transparency = 1
+		collider.Anchored = false
+		collider.CanCollide = true
+		collider.CanQuery = false  -- invisible to raycasts (no hitbox impact)
+		collider.CanTouch = false  -- no touch events
+		collider.Massless = true   -- doesn't affect physics weight
+		collider.CFrame = hrp.CFrame
+		collider.Parent = model
+
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = hrp
+		weld.Part1 = collider
+		weld.Parent = collider
+	end
 
 	-- Build index key: base name for Normal, "BaseName:VariantName" for non-default variants
 	local indexKey = brainrotName

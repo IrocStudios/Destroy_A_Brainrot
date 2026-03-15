@@ -757,6 +757,10 @@ end
 ----------------------------------------------------------------------
 
 function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?)
+	-- Baby/small variants can't rally the pack — they flee alone
+	local sizeTier = entry.Model and entry.Model:GetAttribute("SizeTier")
+	if sizeTier == "baby" or sizeTier == "small" then return end
+
 	local brainrotName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
 	local allCfg = getBrainrotConfig()
 	local bCfg = allCfg[brainrotName]
@@ -1025,6 +1029,15 @@ function AIService:_stepOne(entry: AIEntry)
 					entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 2.5)
 					self:_setState(entry, "Flee")
 					self:_signalPack(entry, "Flee")
+
+				-- Sentry behavior: Fearful + ranged brainrots attack from Idle if target
+				-- is within attack range but outside fear distance (no chase needed)
+				elseif entry.PersonalityName == "Fearful"
+					and pNumber(entry.P, "PreferRanged", 0) >= 0.8
+					and nearDist <= attackRange
+					and nearDist > fearDist then
+					entry.Target = near
+					self:_setState(entry, "Attack")
 				else
 					local aggChance = pNumber(entry.P, "Aggressive", 0.25)
 
@@ -1243,9 +1256,17 @@ function AIService:_stepOne(entry: AIEntry)
 			and isInsideTerritoryXZ(entry.Territory, pos)
 
 		-- Check chase range (scale with territory; recently damaged = commit further)
+		-- Ranged sentries (Fearful + PreferRanged) use attackRange as their effective range,
+		-- not chaseRange — they don't chase, they stand and shoot from distance
 		local entryTerrSpan = getTerritorySpan(entry)
 		local damagedChaseRange = math.max(chaseRange, entryTerrSpan * 1.5)
 		local effectiveChaseRange = recentlyDamaged and damagedChaseRange or chaseRange
+
+		-- Ranged sentries stay engaged as long as target is within attack range
+		if entry.State == "Attack" and pNumber(entry.P, "PreferRanged", 0) >= 0.8 then
+			effectiveChaseRange = math.max(effectiveChaseRange, attackRange)
+		end
+
 		if d > effectiveChaseRange then
 			if not inOwnTerritory then
 				entry.Target = nil

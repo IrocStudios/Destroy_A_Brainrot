@@ -206,6 +206,9 @@ function StandAndHurl:Execute(entry: any, target: any, services: any, moveConfig
 		local dist = (targetPos - origin).Magnitude
 		if maxRange and dist > maxRange then return end
 
+		-- Debounce: each projectile can only hit once
+		local hasHit = false
+
 		local sim = getSimulator()
 		if not sim then
 			-- Fallback: no simulator
@@ -222,12 +225,14 @@ function StandAndHurl:Execute(entry: any, target: any, services: any, moveConfig
 			end
 			local travelTime = math.clamp(dist / speed, 0.05, 2.0)
 			task.wait(travelTime)
+			if hasHit then return end
 			local tc = target and target.Character
 			if tc then
 				local th = tc:FindFirstChildOfClass("Humanoid")
 				local tr = tc:FindFirstChild("HumanoidRootPart")
 				if th and th.Health > 0 and tr and tr:IsA("BasePart") then
 					if (tr.Position - targetPos).Magnitude <= 10 then
+						hasHit = true
 						applyDamageToPlayer(target)
 					end
 				end
@@ -264,17 +269,19 @@ function StandAndHurl:Execute(entry: any, target: any, services: any, moveConfig
 
 		for i = 1, numSteps do
 			task.wait(stepDt)
+			if hasHit then return end
 			local result = sim.StepAndCheck(arcPoints[i], arcPoints[i + 1], playerRayParams)
 			if result then
 				local hitChar, hitPlayer = sim.FindCharacterFromHit(result.Instance)
 				if hitPlayer then
+					hasHit = true
 					applyDamageToPlayer(hitPlayer)
 					return
 				end
 			end
 		end
 
-		if hitWall then return end
+		if hitWall or hasHit then return end
 
 		-- End-of-arc proximity check (dodge mechanic)
 		local tc = target and target.Character
@@ -287,6 +294,7 @@ function StandAndHurl:Execute(entry: any, target: any, services: any, moveConfig
 		local impactDist = (tr.Position - adjustedTarget).Magnitude
 		if impactDist > 10 then return end
 
+		hasHit = true
 		applyDamageToPlayer(target)
 	end
 

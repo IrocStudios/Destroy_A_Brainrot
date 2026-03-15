@@ -110,12 +110,12 @@ function WalkLocomotion:MoveTo(entry: any, targetPos: Vector3)
 	local now = os.clock()
 	local currentPos = hrp.Position
 
-	-- For very short distances, just use direct MoveTo (no pathfinding overhead)
+	-- For very short distances, use safe fallback (raycast check, no pathfinding overhead)
 	local dist = distXZ(currentPos, targetPos)
 	if dist < DIRECT_MOVE_DIST then
 		cleanupPath(state)
 		state.TargetPos = targetPos
-		hum:MoveTo(targetPos)
+		self:_safeFallbackMove(entry, targetPos)
 		return
 	end
 
@@ -163,6 +163,54 @@ function WalkLocomotion:Cleanup(entry: any)
 end
 
 ----------------------------------------------------------------------
+-- Safe fallback: raycast toward target, stop before walls
+----------------------------------------------------------------------
+
+local _rayParams: RaycastParams? = nil
+local function getRayParams(): RaycastParams
+	if _rayParams then return _rayParams end
+	local p = RaycastParams.new()
+	p.FilterType = Enum.RaycastFilterType.Exclude
+	p.FilterDescendantsInstances = {}
+	_rayParams = p
+	return p
+end
+
+function WalkLocomotion:_safeFallbackMove(entry: any, targetPos: Vector3)
+	local hrp: BasePart = entry.HRP
+	local hum: Humanoid = entry.Humanoid
+	if not hrp or not hum then return end
+
+	local origin = hrp.Position
+	local dir = (targetPos - origin)
+	local dist = dir.Magnitude
+	if dist < 0.5 then return end
+
+	local flatDir = Vector3.new(dir.X, 0, dir.Z)
+	if flatDir.Magnitude < 0.1 then return end
+	flatDir = flatDir.Unit
+
+	-- Raycast forward to find walls (cast from waist height)
+	local rayOrigin = Vector3.new(origin.X, origin.Y, origin.Z)
+	local maxDist = math.min(dist, DIRECT_MOVE_DIST)
+	local params = getRayParams()
+	params.FilterDescendantsInstances = { entry.Model }
+
+	local result = Workspace:Raycast(rayOrigin, flatDir * maxDist, params)
+	if result then
+		-- Wall found — move to 2 studs before the wall
+		local safeDist = math.max(0, (result.Position - origin).Magnitude - 2)
+		if safeDist < 1 then return end -- too close to wall, don't move
+		local safePos = origin + flatDir * safeDist
+		hum:MoveTo(Vector3.new(safePos.X, targetPos.Y, safePos.Z))
+	else
+		-- No wall — safe to MoveTo directly (within DIRECT_MOVE_DIST)
+		local safePos = origin + flatDir * maxDist
+		hum:MoveTo(Vector3.new(safePos.X, targetPos.Y, safePos.Z))
+	end
+end
+
+----------------------------------------------------------------------
 -- Path computation
 ----------------------------------------------------------------------
 
@@ -185,20 +233,21 @@ function WalkLocomotion:_computePath(entry: any, targetPos: Vector3)
 
 	if not ok then
 		dprint("ComputeAsync failed:", err)
-		-- Fallback to direct MoveTo
-		entry.Humanoid:MoveTo(targetPos)
+		-- Don't fall back to raw MoveTo — it clips through walls.
+		-- Try moving toward target at a safe short distance via raycast.
+		self:_safeFallbackMove(entry, targetPos)
 		return
 	end
 
 	if path.Status == Enum.PathStatus.NoPath then
-		dprint("No path found, falling back to direct MoveTo")
-		entry.Humanoid:MoveTo(targetPos)
+		dprint("No path found, safe fallback")
+		self:_safeFallbackMove(entry, targetPos)
 		return
 	end
 
 	local waypoints = path:GetWaypoints()
 	if #waypoints < 2 then
-		entry.Humanoid:MoveTo(targetPos)
+		self:_safeFallbackMove(entry, targetPos)
 		return
 	end
 

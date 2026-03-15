@@ -132,7 +132,6 @@ function MoneyService:SpawnMoneyStacks(position: Vector3, totalValue: number, pl
 	end
 
 	local payloadOut = {} :: { any }
-	local baseY = position.Y + 1.0
 
 	-- Scatter tuning
 	local SCATTER_MIN  = 3    -- min scatter radius (studs)
@@ -140,7 +139,7 @@ function MoneyService:SpawnMoneyStacks(position: Vector3, totalValue: number, pl
 	local MAX_Y_DIFF   = 15   -- max vertical difference from origin before rejecting
 	local MAX_ATTEMPTS = 10   -- retries before falling back to center
 
-	-- Raycast params: exclude Enemies folder and MoneyDrops so we hit terrain/parts
+	-- Raycast params: exclude Enemies and MoneyDrops
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 	local excludeList = {} :: { Instance }
@@ -150,7 +149,36 @@ function MoneyService:SpawnMoneyStacks(position: Vector3, totalValue: number, pl
 	if moneyDrops then table.insert(excludeList, moneyDrops) end
 	rayParams.FilterDescendantsInstances = excludeList
 
-	local centerPos = Vector3.new(position.X, baseY, position.Z)
+	-- Find the true ground Y by casting DOWN from near the brainrot's position.
+	-- Starting from position.Y + 3 (just above the brainrot's feet) ensures we hit
+	-- the ground the brainrot was standing on, not tree canopy above.
+	-- If the first hit is a non-ground surface (tree part with "tree" / "leaf" / "branch"
+	-- in name), skip it and re-cast from below that surface.
+	local Workspace = game:GetService("Workspace")
+	local function findGroundY(x: number, z: number): number
+		local castY = position.Y + 3
+		for _ = 1, 5 do -- max 5 penetrations through non-ground surfaces
+			local rayOrigin = Vector3.new(x, castY, z)
+			local rayResult = Workspace:Raycast(rayOrigin, Vector3.new(0, -200, 0), rayParams)
+			if not rayResult then
+				return position.Y -- no ground at all
+			end
+
+			-- Check if we hit a tree/foliage part (skip it)
+			local hitName = rayResult.Instance.Name:lower()
+			if hitName:find("tree") or hitName:find("leaf") or hitName:find("branch")
+				or hitName:find("foliage") or hitName:find("bush") or hitName:find("cone") then
+				-- Skip this surface — re-cast from just below it
+				castY = rayResult.Position.Y - 0.5
+			else
+				return rayResult.Position.Y
+			end
+		end
+		return position.Y -- fallback
+	end
+
+	local groundAtCenter = findGroundY(position.X, position.Z)
+	local centerPos = Vector3.new(position.X, groundAtCenter + 1.0, position.Z)
 
 	for i = 1, stacks do
 		local dropId = HttpService:GenerateGUID(false)
@@ -160,19 +188,15 @@ function MoneyService:SpawnMoneyStacks(position: Vector3, totalValue: number, pl
 			local angle = math.rad(math.random(0, 359))
 			local radius = math.random(SCATTER_MIN, SCATTER_MAX) + math.random()
 			local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-			local candidate = centerPos + offset
+			local candX = position.X + offset.X
+			local candZ = position.Z + offset.Z
 
-			-- Raycast down to verify ground exists and isn't wildly different in height
-			local rayOrigin = Vector3.new(candidate.X, position.Y + 20, candidate.Z)
-			local rayResult = game:GetService("Workspace"):Raycast(rayOrigin, Vector3.new(0, -60, 0), rayParams)
-
-			if rayResult then
-				local groundY = rayResult.Position.Y
-				if math.abs(groundY - position.Y) <= MAX_Y_DIFF then
-					-- Valid drop site
-					pos = Vector3.new(candidate.X, baseY, candidate.Z)
-					break
-				end
+			-- Find ground at this scatter position
+			local groundY = findGroundY(candX, candZ)
+			if math.abs(groundY - groundAtCenter) <= MAX_Y_DIFF then
+				-- Valid drop site — place money on the ground
+				pos = Vector3.new(candX, groundY + 1.0, candZ)
+				break
 			end
 			-- Invalid site (no ground or too far), retry next attempt
 			-- If all attempts fail, pos stays as centerPos (fallback)

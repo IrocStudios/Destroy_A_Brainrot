@@ -89,21 +89,36 @@ end
 
 -- ── Ground raycast ───────────────────────────────────────────────────────────
 local function getGroundY(xzPos: Vector3): number
-	local rayOrigin = Vector3.new(xzPos.X, xzPos.Y + 50, xzPos.Z)
-	local rayDir = Vector3.new(0, -200, 0)
-
+	-- Cast downward from the money's position to find actual ground.
+	-- Multi-penetration: skip tree/foliage parts by name (matches server logic).
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	local excludeList = {} :: { Instance }
 	local moneyDrops = workspace:FindFirstChild("MoneyDrops")
 	if moneyDrops then table.insert(excludeList, moneyDrops) end
+	local enemies = workspace:FindFirstChild("Enemies")
+	if enemies then table.insert(excludeList, enemies) end
 	local char = LOCAL_PLAYER.Character
 	if char then table.insert(excludeList, char) end
 	params.FilterDescendantsInstances = excludeList
 
-	local result = workspace:Raycast(rayOrigin, rayDir, params)
-	if result then
-		return result.Position.Y
+	local castY = xzPos.Y + 5
+	for _ = 1, 5 do -- max 5 penetrations through non-ground surfaces
+		local rayOrigin = Vector3.new(xzPos.X, castY, xzPos.Z)
+		local result = workspace:Raycast(rayOrigin, Vector3.new(0, -200, 0), params)
+		if not result then
+			return xzPos.Y -- no ground at all
+		end
+
+		-- Check if we hit a tree/foliage part (skip it)
+		local hitName = result.Instance.Name:lower()
+		if hitName:find("tree") or hitName:find("leaf") or hitName:find("branch")
+			or hitName:find("foliage") or hitName:find("bush") or hitName:find("cone") then
+			-- Skip this surface — re-cast from just below it
+			castY = result.Position.Y - 0.5
+		else
+			return result.Position.Y
+		end
 	end
 	return xzPos.Y -- fallback
 end

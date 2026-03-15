@@ -371,7 +371,7 @@ local BrainrotConfig = {
 		Attackspeed = 20,
 		HealRate = 3,
 
-		AttackDamage = 5,
+		AttackDamage = 3,
 		AttackRange = 70,
 		AttackCooldown = 1.0,
 
