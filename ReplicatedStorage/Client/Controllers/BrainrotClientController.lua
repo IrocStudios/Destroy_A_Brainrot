@@ -11,7 +11,7 @@ local LOCAL_PLAYER = Players.LocalPlayer
 local BrainrotClient = {}
 BrainrotClient.__index = BrainrotClient
 
-local DEBUG = true
+local DEBUG = false
 local function dprint(...)
 	if DEBUG then
 		print("[BrainrotClient]", ...)

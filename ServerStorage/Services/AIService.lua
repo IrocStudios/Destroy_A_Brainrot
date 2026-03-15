@@ -77,9 +77,22 @@ type AIEntry = {
 	-- Idle fidget tracking
 	ConsecutiveIdles: number, -- how many times in a row we picked "idle" action
 
+	-- Territory return cooldown
+	ReturnCooldownUntil: number, -- don't re-check _shouldReturn until this time
+
+	-- Stuck-hop escalation
+	StuckTicks: number, -- consecutive ticks of near-zero XZ velocity while trying to move
+	StuckHopStage: number, -- 0=none, 1=baby hop done, 2=medium hop done, 3=big hop done
+	LastHopAt: number, -- timestamp of last hop (cooldown)
+
 	-- Flee evasion state
 	FleeZigDir: number, -- +1 or -1, alternates for zigzag
 	FleeNextZig: number, -- tick when next zigzag flip happens
+
+	-- Aggro meter (0-100 continuous anger)
+	Aggro: number,
+	AggroLockedUntil: number,  -- timestamp: aggro cannot decay below 100 until this time
+	AC: { [string]: any },     -- resolved aggro curve parameters
 
 	Conn: { RBXScriptConnection },
 }
@@ -358,6 +371,51 @@ local function resolveLocomotionType(brainrotName: string): string
 end
 
 --//////////////////////////////
+-- Aggro curve resolution
+--//////////////////////////////
+
+local DEFAULT_AGGRO_CURVE = {
+	IdleAggro = 0, DamageGain = 20, ProximityRate = 15, TerritoryRate = 5,
+	CorneredRate = 8, PackGain = 30, DecayRate = 3.0, TerritoryDecayMult = 2.0,
+	OutOfSightDecay = 5, DecayDelay = 4, AccelDecayMult = 2.0,
+	ChaseThreshold = 35, PursuitThreshold = 60, BerserkThreshold = 85,
+	FleeInversion = false, FleeThreshold = 20,
+}
+
+local function resolveAggroCurve(personalityTable: {[string]: any}, brainrotName: string, variantName: string?): {[string]: any}
+	-- Start with defaults
+	local ac = {}
+	for k, v in pairs(DEFAULT_AGGRO_CURVE) do ac[k] = v end
+
+	-- Layer 1: personality AggroCurve
+	local pCurve = personalityTable.AggroCurve
+	if type(pCurve) == "table" then
+		for k, v in pairs(pCurve) do ac[k] = v end
+	end
+
+	-- Layer 2: per-brainrot AggroCurveOverrides
+	local bCfg = getBrainrotConfig()
+	local bEntry = bCfg[brainrotName]
+	if bEntry and type(bEntry.AggroCurveOverrides) == "table" then
+		for k, v in pairs(bEntry.AggroCurveOverrides) do ac[k] = v end
+	end
+
+	-- Layer 3: variant AggroCurveOverrides
+	if variantName and bEntry and type(bEntry.Variants) == "table" then
+		for _, variant in ipairs(bEntry.Variants) do
+			if variant.Name == variantName then
+				if type(variant.VariantAggroCurveOverrides) == "table" then
+					for k, v in pairs(variant.VariantAggroCurveOverrides) do ac[k] = v end
+				end
+				break
+			end
+		end
+	end
+
+	return ac
+end
+
+--//////////////////////////////
 -- Threat assessment
 --//////////////////////////////
 
@@ -602,6 +660,15 @@ function AIService:Register(brainrotId: string, model: Model)
 		BrainrotName = brainrotName,
 		SafeZones = getZoneSafeZones(zoneName),
 		ConsecutiveIdles = 0,
+		ReturnCooldownUntil = 0,
+		StuckTicks = 0,
+		StuckHopStage = 0,
+		LastHopAt = 0,
+
+		-- Aggro meter
+		Aggro = 0,
+		AggroLockedUntil = 0,
+		AC = {},  -- filled below
 
 		Conn = {},
 	}
@@ -613,6 +680,11 @@ function AIService:Register(brainrotId: string, model: Model)
 
 	-- Init attack state
 	AttackRegistry:InitEntry(entry)
+
+	-- Resolve aggro curve
+	local variantName = model:GetAttribute("VariantName")
+	entry.AC = resolveAggroCurve(P, brainrotName, variantName)
+	entry.Aggro = entry.AC.IdleAggro or 0
 
 	-- Damage reaction via health drops
 	table.insert(entry.Conn, hum.HealthChanged:Connect(function(h: number)
@@ -709,11 +781,26 @@ end
 function AIService:_onDamaged(entry: AIEntry)
 	if entry.State == "Dead" then return end
 
-	local P = entry.P
-	local pName = entry.PersonalityName
+	-- Baby protection: if this is a baby-tier brainrot, rally the whole pack
+	local sizeTier = entry.Model and entry.Model:GetAttribute("SizeTier")
+	if sizeTier == "baby" or sizeTier == "small" then
+		self:_signalBabyProtection(entry)
+	end
 
-	-- When damaged, search a MUCH larger radius — damage means you know where they are.
-	-- Scale with territory size: 1.5x territory span, minimum 3x aggro distance.
+	local ac = entry.AC
+	local P = entry.P
+
+	-- Boost aggro from damage
+	local gain = ac and ac.DamageGain or 20
+
+	-- Cornered bonus: extra aggro when low HP
+	if entry.ThreatLevel > 0.7 then
+		gain = gain + (ac and ac.CorneredRate or 8) * 2
+	end
+
+	entry.Aggro = math.clamp((entry.Aggro or 0) + gain, 0, 100)
+
+	-- Wide search radius for finding attacker
 	local aggroDist = pNumber(P, "AggroDistance", self.Config.DefaultDetection)
 	local terrSpan = getTerritorySpan(entry)
 	local damageSearchRange = math.max(aggroDist * 3, terrSpan * 1.5)
@@ -737,75 +824,54 @@ function AIService:_onDamaged(entry: AIEntry)
 		return false
 	end
 
-	-- Fearful: ALWAYS flee on damage, even interrupt current attacks
-	if pName == "Fearful" then
-		doFlee()
-		self:_signalPack(entry, "Flee")
-		return
-	end
+	local fleeInversion = ac and ac.FleeInversion
+	local fleeThreshold = ac and ac.FleeThreshold or 20
+	local chaseThreshold = ac and ac.ChaseThreshold or 35
 
 	-- If currently fleeing, don't re-evaluate
 	if entry.State == "Flee" and now() < entry.FleeUntil then
 		return
 	end
 
-	-- Aggressive/Berserk: ALWAYS retaliate, never flee
-	if pName == "Aggressive" or pName == "Berserk" then
-		if doChase() then
-			self:_signalPack(entry, "Chase", entry.Target)
-		end
-		return
-	end
-
-	-- Territorial: ALWAYS retaliate when damaged (damage is damage, range doesn't matter).
-	-- Territory position only affects pursuit tenacity, not the initial reaction.
-	if pName == "Territorial" then
-		if doChase() then
-			self:_signalPack(entry, "Chase", entry.Target)
-		else
-			-- No player in aggro range to chase — flee briefly instead of standing idle
-			doFlee(1.5)
+	-- FleeInversion (Fearful-type): high aggro = flee, not fight
+	if fleeInversion then
+		if entry.Aggro >= fleeThreshold then
+			doFlee()
 			self:_signalPack(entry, "Flee")
+			return
 		end
-		return
 	end
 
-	-- All other personalities: probabilistic but with guaranteed fallback
-	local retaliates = P.RetaliateOnDamage
-	if retaliates == nil then retaliates = true end
-
-	local retaliateChance = pNumber(P, "RetaliateAggression", pNumber(P, "AttackChance", 0.10))
-	local runChance = pNumber(P, "RunWhenAttacked", pNumber(P, "RunChance", 0.25))
-
-	-- Cornered aggression: if health is low and can't easily flee, boost aggression
-	local threat = computeThreatLevel(entry)
-	if threat > 0.7 then
-		local cornered = pNumber(P, "CorneredAggression", 0.5)
-		retaliateChance = math.max(retaliateChance, cornered)
-		runChance = runChance * (1 - cornered)
-	end
-
-	if math.random() < runChance then
-		doFlee()
-		self:_signalPack(entry, "Flee")
-		return
-	end
-
-	if retaliates and math.random() < retaliateChance then
+	-- Above chase threshold: retaliate (chase)
+	if entry.Aggro >= chaseThreshold then
 		if doChase() then
 			self:_signalPack(entry, "Chase", entry.Target)
 			return
 		end
 	end
 
+	-- Between flee threshold and chase threshold: chance to flee
+	if entry.Aggro >= fleeThreshold and not fleeInversion then
+		local runChance = pNumber(P, "RunWhenAttacked", 0.25)
+		if math.random() < runChance then
+			doFlee()
+			self:_signalPack(entry, "Flee")
+			return
+		end
+		-- Didn't flee, try to chase anyway (retaliation on damage)
+		local retaliates = P.RetaliateOnDamage
+		if retaliates == nil then retaliates = true end
+		if retaliates then
+			if doChase() then
+				self:_signalPack(entry, "Chase", entry.Target)
+				return
+			end
+		end
+	end
+
 	-- Guaranteed fallback: never just stand there after being hit
 	if entry.State == "Idle" or entry.State == "Wander" then
-		if pName == "Skittish" or pName == "Jumpy" then
-			doFlee(1.5) -- brief scatter
-		else
-			-- Passive or unknown: flee briefly
-			doFlee(2.0)
-		end
+		doFlee(1.5)
 	end
 end
 
@@ -813,8 +879,52 @@ end
 -- Pack behavior signaling
 ----------------------------------------------------------------------
 
+function AIService:_signalBabyProtection(entry: AIEntry, attacker: Player?)
+	-- When a baby is damaged, ALL same-species pack members go max aggro
+	local brainrotName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
+	local allCfg = getBrainrotConfig()
+	local bCfg = allCfg[brainrotName]
+	if not bCfg or type(bCfg.PackBehavior) ~= "table" then return end
+	if not bCfg.PackBehavior.ProtectBaby then return end
+
+	local signalFrac = bCfg.PackBehavior.SignalRange or 0.5
+	local radius = 30
+	if entry.Territory then
+		local tSize = entry.Territory.Size
+		radius = math.max(tSize.X, tSize.Z) * signalFrac
+	end
+
+	-- Find attacker (nearest player) if not provided
+	if not attacker then
+		attacker = select(1, pickNearestPlayer(entry.HRP.Position, radius * 2))
+	end
+	if not attacker then return end
+
+	dprint("BABY PROTECTION! All", brainrotName, "rage toward", attacker.Name)
+
+	for _, other in pairs(self._active) do
+		if other.Id == entry.Id then continue end
+		if other.State == "Dead" then continue end
+		if other.ZoneName ~= entry.ZoneName then continue end
+		if not other.HRP or not other.HRP.Parent then continue end
+		-- Must be same species
+		local otherName = tostring(other.Model:GetAttribute("BrainrotName") or "Default")
+		if otherName ~= brainrotName then continue end
+
+		local dist = (other.HRP.Position - entry.HRP.Position).Magnitude
+		if dist > radius then continue end
+
+		-- 100% join — no randomness, full rage
+		other.Aggro = 100
+		other.AggroLockedUntil = now() + 5  -- 5 seconds of pure rage, no decay
+		other.Target = attacker
+		self:_setState(other, "Chase")
+	end
+end
+
 function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?)
 	-- Baby/small variants can't rally the pack — they flee alone
+	-- BUT they trigger ProtectBaby instead (handled in _onDamaged)
 	local sizeTier = entry.Model and entry.Model:GetAttribute("SizeTier")
 	if sizeTier == "baby" or sizeTier == "small" then return end
 
@@ -863,16 +973,26 @@ function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?
 		local joinChance = baseJoinChance + (1 - baseJoinChance) * distFactor * 0.5
 
 		if newState == "Chase" and target then
-			-- Already chasing same target? Skip
 			if other.State == "Chase" and other.Target == target then continue end
 
-			if math.random() < joinChance then
+			-- Boost neighbor's aggro instead of forcing state
+			local otherAC = other.AC
+			local packGain = otherAC and otherAC.PackGain or 30
+			other.Aggro = math.clamp((other.Aggro or 0) + packGain * joinChance, 0, 100)
+
+			-- If aggro exceeds chase threshold, engage
+			local chaseThreshold = otherAC and otherAC.ChaseThreshold or 35
+			if other.Aggro >= chaseThreshold then
 				other.Target = target
 				self:_setState(other, "Chase")
 			end
 		elseif newState == "Flee" then
-			-- Flee signal is stronger — pack animals scatter together
 			if other.State ~= "Flee" then
+				-- Boost aggro (fear response)
+				local otherAC = other.AC
+				local packGain = otherAC and otherAC.PackGain or 30
+				other.Aggro = math.clamp((other.Aggro or 0) + packGain * 0.5, 0, 100)
+
 				other.FleeFrom = entry.FleeFrom
 				other.FleeUntil = now() + pNumber(other.P, "FearTime", 2.5)
 				self:_setState(other, "Flee")
@@ -881,43 +1001,61 @@ function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?
 	end
 end
 
-function AIService:_shouldReturn(entry: AIEntry): boolean
+-- Returns how far (studs) this entry is beyond its territory edge.
+-- Returns 0 if inside territory, nil if no territory.
+function AIService:_overshootDistance(entry: AIEntry): number?
 	local terr = entry.Territory
+	if not terr then return nil end
+	if isInsideTerritoryXZ(terr, entry.HRP.Position) then return 0 end
 
-	if not terr then
-		-- No territory — use spawn pos + leash (hard boundary)
-		local d = (entry.HRP.Position - entry.SpawnPos).Magnitude
-		return d > entry.LeashRadius
-	end
-
-	-- Inside territory — never return
-	if isInsideTerritoryXZ(terr, entry.HRP.Position) then
-		return false
-	end
-
-	-- Calculate how far beyond the territory edge we are
 	local localPos = terr.CFrame:PointToObjectSpace(entry.HRP.Position)
 	local halfX, halfZ = terr.Size.X * 0.5, terr.Size.Z * 0.5
 	local overX = math.max(0, math.abs(localPos.X) - halfX)
 	local overZ = math.max(0, math.abs(localPos.Z) - halfZ)
-	local overshoot = math.sqrt(overX * overX + overZ * overZ)
+	return math.sqrt(overX * overX + overZ * overZ)
+end
 
-	-- Soft leash: TerritoryLeashPct = how far beyond edge (% of territory span)
-	-- Minimum 5-stud grace zone so brainrots don't ping-pong at exact boundary
-	-- due to physics drift, pathfinding overshoot, or collision nudges
-	local span = math.max(terr.Size.X, terr.Size.Z)
-	local leashPct = pNumber(entry.P, "TerritoryLeashPct", 0.20)
-	local maxBuffer = math.max(span * leashPct, 5)
+function AIService:_shouldReturn(entry: AIEntry): boolean
+	local terr = entry.Territory
+	local ac = entry.AC
 
-	-- Beyond hard leash = always return
-	if overshoot >= maxBuffer then
+	if not terr then
+		local d = (entry.HRP.Position - entry.SpawnPos).Magnitude
+		return d > entry.LeashRadius
+	end
+
+	local overshoot = self:_overshootDistance(entry) or 0
+
+	-- Inside territory or within dead zone — never return
+	if overshoot < 5 then
+		return false
+	end
+
+	-- Aggro-based return: if calm (below chase threshold), always return when outside
+	local chaseThreshold = ac and ac.ChaseThreshold or 35
+	if entry.Aggro < chaseThreshold then
 		return true
 	end
 
-	-- Soft zone: return probability increases linearly with distance beyond edge
-	-- At edge: 0% chance. At max buffer: ~LeashStrength chance.
-	local leashStrength = pNumber(entry.P, "LeashStrength", 0.7)
-	local returnChance = (overshoot / maxBuffer) * leashStrength
+	-- Above berserk threshold: never return (full rage, ignores leash)
+	local berserkThreshold = ac and ac.BerserkThreshold or 85
+	if entry.Aggro >= berserkThreshold then
+		return false
+	end
+
+	-- Between chase and berserk: gradient based on aggro level and overshoot
+	local span = math.max(terr.Size.X, terr.Size.Z)
+	local leashPct = pNumber(entry.P, "TerritoryLeashPct", 0.25)
+	local maxBuffer = math.max(span * leashPct, 15)
+
+	local effectiveOvershoot = overshoot - 5
+	local effectiveMax = math.max(maxBuffer - 5, 1)
+	local distRatio = math.min(effectiveOvershoot / effectiveMax, 1.5)
+
+	-- Higher aggro = less likely to return. Scale return chance inversely with aggro.
+	local pursuitThreshold = ac and ac.PursuitThreshold or 60
+	local aggroFactor = 1 - math.clamp((entry.Aggro - chaseThreshold) / (pursuitThreshold - chaseThreshold), 0, 1)
+	local returnChance = distRatio * aggroFactor * 0.5
 	return math.random() < returnChance
 end
 
@@ -1087,6 +1225,87 @@ function AIService:_handleExclusionZone(entry: AIEntry, targetPos: Vector3, zone
 end
 
 --//////////////////////////////
+-- Aggro meter update (per-tick)
+--//////////////////////////////
+
+function AIService:_updateAggro(entry: AIEntry, dt: number)
+	if entry.State == "Dead" then return end
+	local ac = entry.AC
+	if not ac then return end
+
+	local t = now()
+
+	-- Aggro lock (baby protection): no decay while locked
+	if t < (entry.AggroLockedUntil or 0) then return end
+
+	local pos = entry.HRP.Position
+	local idleAggro = ac.IdleAggro or 0
+	local aggro = entry.Aggro
+
+	-- === SOURCES (increase aggro) ===
+
+	-- Proximity: player within AggroDistance
+	local aggroDist = pNumber(entry.P, "AggroDistance", self.Config.DefaultDetection)
+	local nearPlayer, nearDist = pickNearestPlayer(pos, aggroDist)
+	if nearPlayer then
+		aggro = aggro + (ac.ProximityRate or 15) * dt
+
+		-- Territory intrusion: player inside OUR territory (extra aggro)
+		if entry.Territory then
+			local thrp = getCharHRP(nearPlayer)
+			if thrp and isInsideTerritoryXZ(entry.Territory, thrp.Position) then
+				aggro = aggro + (ac.TerritoryRate or 5) * dt
+			end
+		end
+	end
+
+	-- Cornered: low HP boost
+	if entry.ThreatLevel > 0.7 then
+		aggro = aggro + (ac.CorneredRate or 8) * dt
+	end
+
+	-- === DRAINS (decrease aggro) ===
+
+	local decay = (ac.DecayRate or 3.0) * dt
+
+	-- Territory drain: faster decay when outside territory
+	local overshoot = self:_overshootDistance(entry)
+	if overshoot and overshoot > 5 then
+		local territoryMult = ac.TerritoryDecayMult or 2.0
+		local span = getTerritorySpan(entry)
+		local overshootRatio = math.min(overshoot / math.max(span * 0.5, 20), 2.0)
+		decay = decay + (ac.DecayRate or 3.0) * territoryMult * overshootRatio * dt
+	end
+
+	-- Out-of-sight drain: no valid target or target beyond chase range
+	local chaseRange = pNumber(entry.P, "ChaseRange", self.Config.DefaultChaseRange)
+	local hasVisibleTarget = false
+	if entry.Target then
+		local thrp = getCharHRP(entry.Target)
+		if thrp then
+			local d = (thrp.Position - pos).Magnitude
+			if d <= chaseRange then hasVisibleTarget = true end
+		end
+	end
+	if not hasVisibleTarget then
+		decay = decay + (ac.OutOfSightDecay or 5) * dt
+	end
+
+	-- Accelerated decay after no damage for a while
+	local sinceLastDamage = t - entry.LastDamagedAt
+	if sinceLastDamage > (ac.DecayDelay or 4) then
+		decay = decay * (ac.AccelDecayMult or 2.0)
+	end
+
+	-- Apply decay toward IdleAggro (not below)
+	if aggro > idleAggro then
+		aggro = math.max(idleAggro, aggro - decay)
+	end
+
+	entry.Aggro = math.clamp(aggro, 0, 100)
+end
+
+--//////////////////////////////
 -- Main evaluator
 --//////////////////////////////
 
@@ -1095,8 +1314,10 @@ function AIService:_stepAll()
 		if entry.Model.Parent == nil then
 			self._active[id] = nil
 		else
+			self:_updateAggro(entry, self.Config.TickRate or 0.1)
 			self:_stepOne(entry)
 			self:_velocityAnimCheck(entry)
+			self:_stuckHopCheck(entry)
 		end
 	end
 end
@@ -1139,59 +1360,54 @@ function AIService:_stepOne(entry: AIEntry)
 		self:_setState(entry, "Return")
 	end
 
-	-- Return overrides neutral states
+	-- Return overrides neutral states (with cooldown to prevent ping-pong)
 	if entry.State ~= "Return" and entry.State ~= "Chase" and entry.State ~= "Attack"
 		and entry.State ~= "WaitAtEdge" and entry.State ~= "Flee" then
-		if self:_shouldReturn(entry) then
+		if t >= (entry.ReturnCooldownUntil or 0) and self:_shouldReturn(entry) then
 			self:_setState(entry, "Return")
 		end
 	end
+
+	-- (Teleport rescue removed — leash is soft enough that brainrots
+	-- naturally return on their own without forced teleportation)
 
 	-- Acquire target on proximity (only in neutral states)
 	if entry.State == "Idle" or entry.State == "Wander" then
 		if not entry.Target then
 			local near, nearDist = pickNearestPlayer(pos, aggroDist)
 			if near then
-				-- Fearful proximity flee: if player is within FearDistance, flee immediately
-				if entry.PersonalityName == "Fearful" and nearDist <= fearDist then
+				local ac = entry.AC
+				local fleeInversion = ac and ac.FleeInversion
+				local fleeThreshold = ac and ac.FleeThreshold or 20
+				local chaseThreshold = ac and ac.ChaseThreshold or 35
+
+				-- Fearful proximity flee: if player within FearDistance and aggro above flee threshold
+				if fleeInversion and nearDist <= fearDist and entry.Aggro >= fleeThreshold then
 					entry.FleeFrom = near
 					entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 2.5)
 					self:_setState(entry, "Flee")
 					self:_signalPack(entry, "Flee")
 
-				-- Sentry behavior: Fearful + ranged brainrots attack from Idle if target
-				-- is within attack range but outside fear distance (no chase needed)
-				elseif entry.PersonalityName == "Fearful"
+				-- Sentry behavior: Fearful + ranged brainrots attack from Idle
+				elseif fleeInversion
 					and pNumber(entry.P, "PreferRanged", 0) >= 0.8
 					and nearDist <= attackRange
 					and nearDist > fearDist then
 					entry.Target = near
 					self:_setState(entry, "Attack")
-				else
-					local aggChance = pNumber(entry.P, "Aggressive", 0.25)
 
-					-- Territorial intrusion: if the player is inside OUR territory,
-					-- aggro is near-guaranteed (0.95) regardless of base aggression
-					if entry.PersonalityName == "Territorial" and entry.Territory then
-						local thrp = getCharHRP(near)
-						if thrp and isInsideTerritoryXZ(entry.Territory, thrp.Position) then
-							aggChance = 0.95
-						end
-					end
-
-					if math.random() < aggChance then
-						-- Check if target is in exclusion zone before chasing
-						local thrp = getCharHRP(near)
-						if thrp then
-							local inZone, zWeight, zone = checkTargetInExclusionZone(entry, thrp.Position)
-							if inZone and zWeight >= 80 then
-								-- Target in hard-blocked zone, don't aggro
-							else
-								entry.Target = near
-								self:_setState(entry, "Chase")
-								-- Pack animals alert nearby allies when they spot a target
-								self:_signalPack(entry, "Chase", near)
-							end
+				-- Aggro threshold reached: chase
+				elseif entry.Aggro >= chaseThreshold then
+					-- Check exclusion zone
+					local thrp = getCharHRP(near)
+					if thrp then
+						local inZone, zWeight, zone = checkTargetInExclusionZone(entry, thrp.Position)
+						if inZone and zWeight >= 80 then
+							-- Target in hard-blocked zone, don't chase
+						else
+							entry.Target = near
+							self:_setState(entry, "Chase")
+							self:_signalPack(entry, "Chase", near)
 						end
 					end
 				end
@@ -1314,8 +1530,8 @@ function AIService:_stepOne(entry: AIEntry)
 
 	---------- RETURN ----------
 	if entry.State == "Return" then
-		-- Fearful proximity flee: even while returning, flee if player gets close
-		if entry.PersonalityName == "Fearful" then
+		-- FleeInversion proximity flee: even while returning, flee if player gets close
+		if entry.AC and entry.AC.FleeInversion then
 			local near, nearDist = pickNearestPlayer(pos, fearDist)
 			if near and nearDist <= fearDist then
 				entry.FleeFrom = near
@@ -1363,19 +1579,28 @@ function AIService:_stepOne(entry: AIEntry)
 			end
 		end
 
+		if not entry.ReturnTarget then
+			-- No return target computed (edge case) — fall back to spawn
+			local y = territoryY(entry.Territory, pos.Y)
+			entry.ReturnTarget = Vector3.new(entry.SpawnPos.X, y, entry.SpawnPos.Z)
+		end
+
 		moveToward(entry, entry.ReturnTarget)
 		safeSetAnim(entry, "Walk")
 
-		local terr = entry.Territory
-		if terr then
-			if isInsideTerritoryXZ(terr, pos) then
-				entry.ReturnTarget = nil
-				self:_setState(entry, "Idle")
-			end
-		else
-			if (pos - entry.SpawnPos).Magnitude <= 12 then
-				self:_setState(entry, "Idle")
-			end
+		-- Arrival check: reached return target OR back inside territory
+		local dToTarget = math.sqrt(
+			(entry.ReturnTarget.X - pos.X)^2 + (entry.ReturnTarget.Z - pos.Z)^2
+		)
+		local insideTerritory = entry.Territory and isInsideTerritoryXZ(entry.Territory, pos)
+		if dToTarget <= 5 or insideTerritory then
+			entry.ReturnTarget = nil
+			entry.ReturnCooldownUntil = now() + 3 -- brief cooldown before leash re-checks
+			self:_setState(entry, "Idle")
+		elseif not entry.Territory and (pos - entry.SpawnPos).Magnitude <= 12 then
+			entry.ReturnTarget = nil
+			entry.ReturnCooldownUntil = now() + 3
+			self:_setState(entry, "Idle")
 		end
 		return
 	end
@@ -1394,8 +1619,9 @@ function AIService:_stepOne(entry: AIEntry)
 
 		local d = (thrp.Position - pos).Magnitude
 
-		-- Fearful proximity flee: if target gets within FearDistance, abandon attack and flee
-		if entry.PersonalityName == "Fearful" and d <= fearDist then
+		-- FleeInversion proximity flee: if target gets within FearDistance, abandon attack
+		local fleeInversion = entry.AC and entry.AC.FleeInversion
+		if fleeInversion and d <= fearDist then
 			entry.Target = nil
 			entry.FleeFrom = target
 			entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 2.5)
@@ -1432,14 +1658,33 @@ function AIService:_stepOne(entry: AIEntry)
 			end
 		end
 
-		-- Pursuit tenacity: chance to give up chase over time
-		-- Skip if recently damaged (committed) or inside own territory (territorial defense)
-		if entry.State == "Chase" and d > aggroDist and not recentlyDamaged and not inOwnTerritory then
-			local tenacity = pNumber(entry.P, "PursuitTenacity", 0.5)
-			if math.random() > tenacity then
+		-- Pursuit break-off: if aggro has decayed below chase threshold, give up
+		if entry.State == "Chase" and not inOwnTerritory then
+			local chaseThreshold = entry.AC and entry.AC.ChaseThreshold or 35
+			if entry.Aggro < chaseThreshold then
 				entry.Target = nil
 				self:_setState(entry, "Return")
 				return
+			end
+		end
+
+		-- Territory pull: aggro decays faster outside territory (_updateAggro handles this).
+		-- If aggro drops below pursuit threshold outside territory, return.
+		if not inOwnTerritory and not recentlyDamaged then
+			local pursuitThreshold = entry.AC and entry.AC.PursuitThreshold or 60
+			if entry.Aggro < pursuitThreshold then
+				local overshoot = self:_overshootDistance(entry)
+				if overshoot and overshoot > 10 then
+					-- Probability scales with distance: further out = more likely to break off
+					local span = getTerritorySpan(entry)
+					local ratio = math.min(overshoot / math.max(span * 0.5, 20), 2.0)
+					local breakChance = ratio * 0.15
+					if math.random() < breakChance then
+						entry.Target = nil
+						self:_setState(entry, "Return")
+						return
+					end
+				end
 			end
 		end
 
@@ -1627,12 +1872,151 @@ function AIService:_velocityAnimCheck(entry: AIEntry)
 	-- Only override movement animations (Walk, Run)
 	if currentAnim ~= "Walk" and currentAnim ~= "Run" then return end
 
+	-- Don't switch to Idle if we're mid-hop — the brainrot is still trying to move,
+	-- just physically stuck. The hop system will handle it.
+	if (entry.StuckHopStage or 0) > 0 then return end
+	-- Also skip if we just hopped recently (still in the air / landing)
+	if now() - (entry.LastHopAt or 0) < 0.5 then return end
+
 	-- Check actual velocity (XZ plane only, ignore Y for jumps/slopes)
 	local vel = hrp.AssemblyLinearVelocity
 	local xzSpeed = math.sqrt(vel.X * vel.X + vel.Z * vel.Z)
 
 	if xzSpeed < MOVE_VELOCITY_THRESHOLD then
 		safeSetAnim(entry, "Idle")
+	end
+end
+
+--//////////////////////////////
+-- Stuck-hop escalation system
+--//////////////////////////////
+-- When a brainrot is trying to move but stuck (near-zero XZ velocity),
+-- escalate through increasingly powerful hops to clear obstacles.
+-- Stage 0 → baby hop (clears seams/lips)
+-- Stage 1 → medium hop (clears small ledges)
+-- Stage 2 → big hop (clears larger obstacles)
+-- Stage 3 → give up on current path, pick new destination
+
+local STUCK_TICKS_BABY    = 3   -- 0.3s stuck → tiny pop (clears <1 stud)
+local STUCK_TICKS_MEDIUM  = 10  -- 1.0s still stuck → medium hop
+local STUCK_TICKS_BIG     = 18  -- 1.8s still stuck → big hop
+local STUCK_TICKS_REPATH  = 26  -- 2.6s still stuck → abandon path
+local HOP_COOLDOWN        = 1.2 -- seconds between hops
+
+-- Hop power per stage (JumpPower values)
+-- Stage 1 is a tiny pop — just enough to clear a seam/lip
+local HOP_POWERS = { 10, 30, 50 } -- tiny pop, medium, big
+
+-- Movement states where stuck-hop applies
+local MOVEMENT_STATES: { [AIStateName]: boolean } = {
+	Wander = true,
+	Chase = true,
+	Flee = true,
+	Return = true,
+}
+
+function AIService:_stuckHopCheck(entry: AIEntry)
+	if entry.State == "Dead" then return end
+	local hrp = entry.HRP
+	if not hrp then return end
+
+	-- Only check during movement states
+	if not MOVEMENT_STATES[entry.State] then
+		entry.StuckTicks = 0
+		entry.StuckHopStage = 0
+		return
+	end
+
+	-- Skip flying brainrots
+	if isFlying(entry) then return end
+
+	-- Check XZ velocity
+	local vel = hrp.AssemblyLinearVelocity
+	local xzSpeed = math.sqrt(vel.X * vel.X + vel.Z * vel.Z)
+
+	if xzSpeed >= MOVE_VELOCITY_THRESHOLD then
+		-- Moving fine — reset stuck state
+		entry.StuckTicks = 0
+		entry.StuckHopStage = 0
+		return
+	end
+
+	-- Stuck: increment counter
+	entry.StuckTicks = (entry.StuckTicks or 0) + 1
+
+	-- Cooldown check
+	if now() - (entry.LastHopAt or 0) < HOP_COOLDOWN then
+		return
+	end
+
+	local hum = entry.Humanoid
+
+	-- Stage 3: repath — give up on current destination entirely
+	if entry.StuckTicks >= STUCK_TICKS_REPATH then
+		entry.StuckTicks = 0
+		entry.StuckHopStage = 0
+		entry.LastHopAt = now()
+
+		-- Force a new path by clearing current target and re-entering state
+		if entry.State == "Wander" then
+			entry.WanderTarget = self:_pickWanderPoint(entry)
+			if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+				entry.Locomotion:Stop(entry)
+			end
+		elseif entry.State == "Return" then
+			entry.ReturnTarget = nil -- will be re-picked next tick
+			if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+				entry.Locomotion:Stop(entry)
+			end
+		end
+		-- Chase/Flee: target is a player, path will recompute automatically
+		-- via locomotion's MoveTo on next tick
+		dprint(entry.Id, "stuck repath — giving up on current path")
+		return
+	end
+
+	-- Determine which hop stage to attempt
+	local stage = 0
+	if entry.StuckTicks >= STUCK_TICKS_BIG then
+		stage = 3
+	elseif entry.StuckTicks >= STUCK_TICKS_MEDIUM then
+		stage = 2
+	elseif entry.StuckTicks >= STUCK_TICKS_BABY then
+		stage = 1
+	end
+
+	-- Only hop if we haven't already done this stage
+	if stage > 0 and stage > (entry.StuckHopStage or 0) then
+		local basePower = HOP_POWERS[stage] or 50
+
+		-- Per-brainrot hop multiplier (e.g. Garamararam = 0.7 for lower hops)
+		local hopMult = 1.0
+		local brainrotCfg = getBrainrotConfig()
+		local bCfg = brainrotCfg[entry.BrainrotName]
+		if bCfg and bCfg.StuckHopMult then
+			hopMult = bCfg.StuckHopMult
+		end
+
+		local hopPower = basePower * hopMult
+
+		-- Apply hop via Humanoid.Jump with temporary JumpPower override
+		local origJumpPower = hum.JumpPower
+		local origUseJumpPower = hum.UseJumpPower
+		hum.UseJumpPower = true
+		hum.JumpPower = hopPower
+		hum.Jump = true
+
+		-- Restore on next frame
+		task.defer(function()
+			if hum and hum.Parent then
+				hum.JumpPower = origJumpPower
+				hum.UseJumpPower = origUseJumpPower
+			end
+		end)
+
+		entry.StuckHopStage = stage
+		entry.LastHopAt = now()
+		dprint(entry.Id, "stuck hop stage", stage, "power", hopPower)
 	end
 end
 

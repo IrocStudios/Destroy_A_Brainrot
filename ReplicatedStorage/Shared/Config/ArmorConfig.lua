@@ -12,23 +12,23 @@
 
 local ArmorConfig = {}
 
-ArmorConfig.StartPrice  = 1000    -- step 0 costs $1,000
-ArmorConfig.PriceGrowth = 1.15    -- ~15 % more per step → step 99 ≈ $1B
+ArmorConfig.StartPrice  = 500     -- step 0 costs $500 (cheaper early curve)
+ArmorConfig.PriceGrowth = 1.158   -- ~15.8 % more per step → converges to ~$1B at step 99
 
 -- Brackets: each defines a run of steps and the armor awarded per step.
 -- Players progress through brackets in order.
 ArmorConfig.Brackets = {
-	{ steps = 10, amount = 5     },  -- Steps  0-9:   +5      (50 total)
-	{ steps = 10, amount = 10    },  -- Steps 10-19:  +10     (100 → 150 cumul)
-	{ steps = 10, amount = 25    },  -- Steps 20-29:  +25     (250 → 400)
-	{ steps = 10, amount = 50    },  -- Steps 30-39:  +50     (500 → 900)
-	{ steps = 10, amount = 100   },  -- Steps 40-49:  +100    (1,000 → 1,900)
-	{ steps = 10, amount = 250   },  -- Steps 50-59:  +250    (2,500 → 4,400)
-	{ steps = 10, amount = 500   },  -- Steps 60-69:  +500    (5,000 → 9,400)
-	{ steps = 10, amount = 1000  },  -- Steps 70-79:  +1,000  (10,000 → 19,400)
-	{ steps = 10, amount = 2500  },  -- Steps 80-89:  +2,500  (25,000 → 44,400)
-	{ steps = 10, amount = 5000  },  -- Steps 90-99:  +5,000  (50,000 → 94,400)
-	{ steps = 1,  amount = 5600, price = 1500000000 }, -- Step 100: +5,600 (→ 100,000) @ $1.5B
+	{ steps = 10, amount = 10    },  -- Steps  0-9:   +10     (100 total)
+	{ steps = 10, amount = 20    },  -- Steps 10-19:  +20     (200 → 300 cumul)
+	{ steps = 10, amount = 50    },  -- Steps 20-29:  +50     (500 → 800)
+	{ steps = 10, amount = 100   },  -- Steps 30-39:  +100    (1,000 → 1,800)
+	{ steps = 10, amount = 200   },  -- Steps 40-49:  +200    (2,000 → 3,800)
+	{ steps = 10, amount = 500   },  -- Steps 50-59:  +500    (5,000 → 8,800)
+	{ steps = 10, amount = 1000  },  -- Steps 60-69:  +1,000  (10,000 → 18,800)
+	{ steps = 10, amount = 2000  },  -- Steps 70-79:  +2,000  (20,000 → 38,800)
+	{ steps = 10, amount = 5000  },  -- Steps 80-89:  +5,000  (50,000 → 88,800)
+	{ steps = 10, amount = 10000 },  -- Steps 90-99:  +10,000 (100,000 → 188,800)
+	{ steps = 1,  amount = 11200, price = 1500000000 }, -- Step 100: +11,200 (→ 200,000) @ $1.5B
 }
 
 -- Precompute totals from brackets
@@ -67,8 +67,20 @@ function ArmorConfig.GetStep(step: number): (number, number)
 		remaining -= b.steps
 	end
 
-	-- Price: bracket override or exponential formula
-	local price = customPrice or math.floor(ArmorConfig.StartPrice * ArmorConfig.PriceGrowth ^ step)
+	-- Price: cheap intro ramp for first 5 steps, then normal exponential curve
+	local raw
+	if customPrice then
+		raw = customPrice
+	elseif step < 5 then
+		-- Steps 0-4: $100 → $750, easing into the exponential curve at step 5 (~$1k)
+		local introRamp = { 100, 200, 350, 500, 750 }
+		raw = introRamp[step + 1]
+	else
+		-- Steps 5+: normal exponential curve (starting where step 5 would naturally land)
+		raw = math.floor(ArmorConfig.StartPrice * ArmorConfig.PriceGrowth ^ step)
+	end
+	local price = math.floor(raw / 100 + 0.5) * 100  -- round to nearest 100
+	if price < 100 then price = 100 end               -- minimum $100
 	return amount, price
 end
 

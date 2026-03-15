@@ -2,7 +2,7 @@
 -- Data-only personality definitions used by AIService.
 -- All fields are OPTIONAL; AIService supplies safe defaults.
 --
--- Combat fields (new):
+-- Combat fields:
 --   DefaultAttackMoves: fallback move list if BrainrotConfig doesn't specify
 --   PreferRanged: 0=always melee, 1=always ranged when both available
 --   HeavyAttackBias: chance to pick heavy over light when both valid
@@ -13,12 +13,30 @@
 --   TerritoryTenacity: relentlessness inside own territory (Territorial only)
 --   LeashStrength: how strongly it obeys leash radius (0=ignores, 1=strict)
 --
--- ExclusionBehavior (new):
+-- ExclusionBehavior:
 --   LowThreshold: ignores zones below this weight
 --   WaitAtEdge: parks at zone boundary when blocked
 --   WaitPatience: seconds to wait before abandoning
 --   PushThroughCost: willingness to enter medium-weight zones (0=never, 1=always)
 --   PacingRadius: how far to pace while waiting at edge
+--
+-- AggroCurve — continuous anger meter (0-100) parameters:
+--   IdleAggro: resting aggro level (0 = calm by default)
+--   DamageGain: aggro added per damage event
+--   ProximityRate: aggro/sec when player within AggroDistance
+--   TerritoryRate: aggro/sec when player inside territory
+--   CorneredRate: aggro/sec when health low
+--   PackGain: aggro added from pack ally signal
+--   DecayRate: base aggro/sec passive decay back toward IdleAggro
+--   TerritoryDecayMult: extra decay multiplier when outside own territory
+--   OutOfSightDecay: extra aggro/sec drain when target not visible/in range
+--   DecayDelay: seconds after last damage before decay accelerates
+--   AccelDecayMult: decay speed multiplier after DecayDelay expires
+--   ChaseThreshold: aggro level to start chasing (30=hard to anger, 12=hair-trigger)
+--   PursuitThreshold: aggro level for aggressive pursuit outside territory
+--   BerserkThreshold: aggro level to ignore leash entirely
+--   FleeInversion: if true, high aggro = Flee instead of Chase (Fearful personality)
+--   FleeThreshold: aggro level at which flee triggers (for FleeInversion or damage-flee)
 
 local PersonalityConfig = {
 
@@ -69,6 +87,26 @@ local PersonalityConfig = {
 			PushThroughCost = 0.15,
 			PacingRadius = 0,
 		},
+
+		-- Aggro curve: slow to anger, fast to calm down
+		AggroCurve = {
+			IdleAggro = 0,
+			DamageGain = 20,
+			ProximityRate = 12,
+			TerritoryRate = 4,
+			CorneredRate = 8,
+			PackGain = 30,
+			DecayRate = 4.0,
+			TerritoryDecayMult = 2.0,
+			OutOfSightDecay = 5,
+			DecayDelay = 4,
+			AccelDecayMult = 2.0,
+			ChaseThreshold = 40,
+			PursuitThreshold = 65,
+			BerserkThreshold = 90,
+			FleeInversion = false,
+			FleeThreshold = 25,
+		},
 	},
 
 	----------------------------------------------------------------------
@@ -118,6 +156,26 @@ local PersonalityConfig = {
 			PushThroughCost = 0.05,
 			PacingRadius = 0,
 		},
+
+		-- Aggro curve: gets scared fast, calms down fast, flees instead of chasing
+		AggroCurve = {
+			IdleAggro = 0,
+			DamageGain = 25,
+			ProximityRate = 25,
+			TerritoryRate = 2,
+			CorneredRate = 12,
+			PackGain = 40,
+			DecayRate = 5.0,
+			TerritoryDecayMult = 1.5,
+			OutOfSightDecay = 8,
+			DecayDelay = 3,
+			AccelDecayMult = 2.5,
+			ChaseThreshold = 80,
+			PursuitThreshold = 90,
+			BerserkThreshold = 95,
+			FleeInversion = true,
+			FleeThreshold = 15,
+		},
 	},
 
 	----------------------------------------------------------------------
@@ -164,6 +222,26 @@ local PersonalityConfig = {
 			PushThroughCost = 0.6,
 			PacingRadius = 8,
 		},
+
+		-- Aggro curve: quick to anger, slow to calm, low thresholds
+		AggroCurve = {
+			IdleAggro = 8,
+			DamageGain = 30,
+			ProximityRate = 40,
+			TerritoryRate = 6,
+			CorneredRate = 12,
+			PackGain = 45,
+			DecayRate = 1.5,
+			TerritoryDecayMult = 1.5,
+			OutOfSightDecay = 3,
+			DecayDelay = 6,
+			AccelDecayMult = 1.5,
+			ChaseThreshold = 18,
+			PursuitThreshold = 40,
+			BerserkThreshold = 70,
+			FleeInversion = false,
+			FleeThreshold = 0,
+		},
 	},
 
 	----------------------------------------------------------------------
@@ -201,7 +279,7 @@ local PersonalityConfig = {
 		PursuitTenacity = 0.4,
 		TerritoryTenacity = 1.0,
 		CorneredAggression = 0.85,
-		LeashStrength = 0.95,
+		LeashStrength = 0.55,
 
 		-- Exclusion zone behavior
 		ExclusionBehavior = {
@@ -210,6 +288,26 @@ local PersonalityConfig = {
 			WaitPatience = 5,
 			PushThroughCost = 0.2,
 			PacingRadius = 6,
+		},
+
+		-- Aggro curve: territory intrusion is the BIG trigger, fast decay outside
+		AggroCurve = {
+			IdleAggro = 5,
+			DamageGain = 28,
+			ProximityRate = 20,
+			TerritoryRate = 35,
+			CorneredRate = 10,
+			PackGain = 40,
+			DecayRate = 2.5,
+			TerritoryDecayMult = 3.0,
+			OutOfSightDecay = 4,
+			DecayDelay = 5,
+			AccelDecayMult = 2.0,
+			ChaseThreshold = 22,
+			PursuitThreshold = 55,
+			BerserkThreshold = 82,
+			FleeInversion = false,
+			FleeThreshold = 0,
 		},
 	},
 
@@ -257,6 +355,26 @@ local PersonalityConfig = {
 			PushThroughCost = 0.3,
 			PacingRadius = 12,
 		},
+
+		-- Aggro curve: moderate, unpredictable, may flee at mid-levels
+		AggroCurve = {
+			IdleAggro = 3,
+			DamageGain = 22,
+			ProximityRate = 18,
+			TerritoryRate = 5,
+			CorneredRate = 8,
+			PackGain = 35,
+			DecayRate = 3.0,
+			TerritoryDecayMult = 2.0,
+			OutOfSightDecay = 5,
+			DecayDelay = 4,
+			AccelDecayMult = 2.0,
+			ChaseThreshold = 30,
+			PursuitThreshold = 55,
+			BerserkThreshold = 85,
+			FleeInversion = false,
+			FleeThreshold = 20,
+		},
 	},
 
 	----------------------------------------------------------------------
@@ -303,6 +421,26 @@ local PersonalityConfig = {
 			PushThroughCost = 0.1,
 			PacingRadius = 0,
 		},
+
+		-- Aggro curve: slow to anger, fast to forget, coinflip flee/fight
+		AggroCurve = {
+			IdleAggro = 0,
+			DamageGain = 18,
+			ProximityRate = 8,
+			TerritoryRate = 3,
+			CorneredRate = 7,
+			PackGain = 25,
+			DecayRate = 4.5,
+			TerritoryDecayMult = 2.5,
+			OutOfSightDecay = 6,
+			DecayDelay = 3,
+			AccelDecayMult = 2.5,
+			ChaseThreshold = 45,
+			PursuitThreshold = 65,
+			BerserkThreshold = 90,
+			FleeInversion = false,
+			FleeThreshold = 25,
+		},
 	},
 
 	----------------------------------------------------------------------
@@ -348,6 +486,26 @@ local PersonalityConfig = {
 			WaitPatience = 20,
 			PushThroughCost = 0.85,
 			PacingRadius = 10,
+		},
+
+		-- Aggro curve: always angry, barely decays, compressed thresholds
+		AggroCurve = {
+			IdleAggro = 15,
+			DamageGain = 35,
+			ProximityRate = 55,
+			TerritoryRate = 8,
+			CorneredRate = 15,
+			PackGain = 50,
+			DecayRate = 0.5,
+			TerritoryDecayMult = 1.2,
+			OutOfSightDecay = 1,
+			DecayDelay = 8,
+			AccelDecayMult = 1.2,
+			ChaseThreshold = 12,
+			PursuitThreshold = 30,
+			BerserkThreshold = 50,
+			FleeInversion = false,
+			FleeThreshold = 0,
 		},
 	},
 }

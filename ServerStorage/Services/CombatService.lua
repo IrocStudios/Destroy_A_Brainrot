@@ -52,7 +52,25 @@ function CombatService:Init(services: Services)
 	dprint("Init OK.")
 end
 
+local HRP_HITBOX_SCALE = 0.80 -- 80% of default HRP size
+
 function CombatService:Start()
+	-- Shrink player HRP collision to 80% of default (HRP is invisible, only affects physics)
+	local function shrinkHRP(character: Model)
+		local hrp = character:WaitForChild("HumanoidRootPart", 5)
+		if hrp and hrp:IsA("BasePart") then
+			hrp.Size = hrp.Size * HRP_HITBOX_SCALE
+		end
+	end
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character then shrinkHRP(player.Character) end
+		player.CharacterAdded:Connect(shrinkHRP)
+	end
+	Players.PlayerAdded:Connect(function(player)
+		player.CharacterAdded:Connect(shrinkHRP)
+	end)
+
 	dprint("Start OK.")
 end
 

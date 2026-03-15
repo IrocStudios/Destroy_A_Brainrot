@@ -314,6 +314,7 @@ type VariantResult = {
 	StatOverrides: { [string]: number }?,
 	VariantMoveOverrides: { [string]: any }?,
 	VariantPersonalityOverrides: { [string]: any }?,
+	VariantPrice: number?,
 }
 
 local function rollVariant(brainrotName: string): VariantResult
@@ -360,6 +361,7 @@ local function rollVariant(brainrotName: string): VariantResult
 		StatOverrides = type(chosen.StatOverrides) == "table" and chosen.StatOverrides or nil,
 		VariantMoveOverrides = type(chosen.VariantMoveOverrides) == "table" and chosen.VariantMoveOverrides or nil,
 		VariantPersonalityOverrides = type(chosen.VariantPersonalityOverrides) == "table" and chosen.VariantPersonalityOverrides or nil,
+		VariantPrice = tonumber(chosen.VariantPrice),
 	}
 end
 
@@ -823,8 +825,12 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 				end
 			end
 		end
-		-- If AttackDamage was overridden, also scale the health/value proportionally
-		-- (not strictly needed, but keeps balance consistent)
+		-- Health lives on the Humanoid, not EnemyInfo — handle separately
+		if statOverrides.Health then
+			maxHealth = math.floor(maxHealth * statOverrides.Health + 0.5)
+			hum.MaxHealth = maxHealth
+			hum.Health = maxHealth
+		end
 	end
 
 	-- Apply variant name tag to display name
@@ -860,6 +866,16 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 
 		dprint("Size-scaled stats:", brainrotName, "HP=", maxHealth, "Value=", totalValue,
 			"SizeMult=", sizeMult)
+	end
+
+	-- Per-variant absolute price override (bypasses basePrice × sizeMult calculation)
+	if variant.VariantPrice then
+		totalValue = variant.VariantPrice
+		local enemyInfo = model:FindFirstChild("EnemyInfo")
+		if enemyInfo and enemyInfo:IsA("Configuration") then
+			enemyInfo:SetAttribute("Price", totalValue)
+		end
+		dprint("VariantPrice override:", brainrotName, variant.Name, "=", totalValue)
 	end
 
 	-- Resize HRP to match body (after scaling)
