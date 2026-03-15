@@ -38,6 +38,12 @@ function MultiSwing:Execute(entry: any, target: any, services: any, moveConfig: 
 	for i = 1, swings do
 		if hum.Health <= 0 then return end
 
+		-- Check if target is knocked back (invulnerable)
+		if services and services.KnockbackService
+			and services.KnockbackService:IsKnockedBack(target) then
+			return
+		end
+
 		-- Verify target each swing
 		local targetChar = target and target.Character
 		if not targetChar then return end

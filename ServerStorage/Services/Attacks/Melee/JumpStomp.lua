@@ -101,6 +101,12 @@ function JumpStomp:Execute(entry: any, target: any, services: any, moveConfig: a
 		local d = (pHRP.Position - impactPos).Magnitude
 		if d > aoeRadius then continue end
 
+		-- Check if target is knocked back (invulnerable)
+		if services and services.KnockbackService
+			and services.KnockbackService:IsKnockedBack(plr) then
+			continue
+		end
+
 		-- Distance falloff: 100% at center, 50% at edge
 		local falloff = 1 - (d / aoeRadius) * 0.5
 		local dmg = math.floor(finalDamage * falloff + 0.5)

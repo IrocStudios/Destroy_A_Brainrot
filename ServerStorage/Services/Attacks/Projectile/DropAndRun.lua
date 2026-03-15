@@ -98,6 +98,12 @@ function DropAndRun:Execute(entry: any, target: any, services: any, moveConfig: 
 		local d = (pHRP.Position - dropPos).Magnitude
 		if d > aoeRadius then continue end
 
+		-- Check if target is knocked back (invulnerable)
+		if services and services.KnockbackService
+			and services.KnockbackService:IsKnockedBack(plr) then
+			continue
+		end
+
 		local falloff = 1 - (d / aoeRadius) * 0.4
 		local dmg = math.floor(finalDamage * falloff + 0.5)
 

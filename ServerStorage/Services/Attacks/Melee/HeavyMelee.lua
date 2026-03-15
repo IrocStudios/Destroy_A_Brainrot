@@ -47,6 +47,13 @@ function HeavyMelee:Execute(entry: any, target: any, services: any, moveConfig: 
 	local damageMult = (moveConfig and moveConfig.DamageMult) or 2.5
 	local finalDamage = math.floor(baseDamage * damageMult + 0.5)
 
+	-- Check if target is knocked back (invulnerable) — skip if brainrot ignores it
+	local ignoreInvuln = entry.Model and entry.Model:GetAttribute("IgnoreKnockbackInvuln")
+	if not ignoreInvuln and services and services.KnockbackService
+		and services.KnockbackService:IsKnockedBack(target) then
+		return
+	end
+
 	pcall(function()
 		local armorSvc = services and services.ArmorService
 		if armorSvc and target then
@@ -58,6 +65,18 @@ function HeavyMelee:Execute(entry: any, target: any, services: any, moveConfig: 
 			targetHum:TakeDamage(finalDamage)
 		end
 	end)
+
+	-- Apply knockback if configured (opt-in via MoveOverrides)
+	local knockbackCfg = moveConfig and moveConfig.Knockback
+	if knockbackCfg and services and services.KnockbackService then
+		local ignoreActive = entry.Model and entry.Model:GetAttribute("IgnoreKnockbackInvuln") or false
+		services.KnockbackService:ApplyKnockback(target, knockbackCfg.Type or "throw", {
+			originPosition = entry.HRP and entry.HRP.Position or nil,
+			magnitude = knockbackCfg.Magnitude,
+			ragdollDuration = knockbackCfg.RagdollDuration,
+			ignoreActiveKnockback = ignoreActive,
+		})
+	end
 end
 
 function HeavyMelee:GetAnimationName(): string

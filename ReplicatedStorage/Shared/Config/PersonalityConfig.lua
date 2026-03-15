@@ -58,6 +58,9 @@ local PersonalityConfig = {
 		CorneredAggression = 0.7,
 		LeashStrength = 0.7,
 
+		-- Flee style: "straight" | "zigzag" | "scatter"
+		FleeStyle = "straight",
+
 		-- Exclusion zone behavior
 		ExclusionBehavior = {
 			LowThreshold = 20,
@@ -103,6 +106,9 @@ local PersonalityConfig = {
 		PursuitTenacity = 0.0,
 		CorneredAggression = 0.9,
 		LeashStrength = 0.5,
+
+		-- Flee style: scatter by default for fearful types
+		FleeStyle = "scatter",
 
 		-- Exclusion zone behavior
 		ExclusionBehavior = {

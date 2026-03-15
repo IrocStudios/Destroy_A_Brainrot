@@ -72,6 +72,10 @@ type AIEntry = {
 	SizeMultiplier: number,
 	BrainrotName: string,
 
+	-- Flee evasion state
+	FleeZigDir: number, -- +1 or -1, alternates for zigzag
+	FleeNextZig: number, -- tick when next zigzag flip happens
+
 	Conn: { RBXScriptConnection },
 }
 
@@ -1015,29 +1019,37 @@ function AIService:_stepOne(entry: AIEntry)
 		if not entry.Target then
 			local near, nearDist = pickNearestPlayer(pos, aggroDist)
 			if near then
-				local aggChance = pNumber(entry.P, "Aggressive", 0.25)
+				-- Fearful proximity flee: if player is within FearDistance, flee immediately
+				if entry.PersonalityName == "Fearful" and nearDist <= fearDist then
+					entry.FleeFrom = near
+					entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 2.5)
+					self:_setState(entry, "Flee")
+					self:_signalPack(entry, "Flee")
+				else
+					local aggChance = pNumber(entry.P, "Aggressive", 0.25)
 
-				-- Territorial intrusion: if the player is inside OUR territory,
-				-- aggro is near-guaranteed (0.95) regardless of base aggression
-				if entry.PersonalityName == "Territorial" and entry.Territory then
-					local thrp = getCharHRP(near)
-					if thrp and isInsideTerritoryXZ(entry.Territory, thrp.Position) then
-						aggChance = 0.95
+					-- Territorial intrusion: if the player is inside OUR territory,
+					-- aggro is near-guaranteed (0.95) regardless of base aggression
+					if entry.PersonalityName == "Territorial" and entry.Territory then
+						local thrp = getCharHRP(near)
+						if thrp and isInsideTerritoryXZ(entry.Territory, thrp.Position) then
+							aggChance = 0.95
+						end
 					end
-				end
 
-				if math.random() < aggChance then
-					-- Check if target is in exclusion zone before chasing
-					local thrp = getCharHRP(near)
-					if thrp then
-						local inZone, zWeight, zone = checkTargetInExclusionZone(entry, thrp.Position)
-						if inZone and zWeight >= 80 then
-							-- Target in hard-blocked zone, don't aggro
-						else
-							entry.Target = near
-							self:_setState(entry, "Chase")
-							-- Pack animals alert nearby allies when they spot a target
-							self:_signalPack(entry, "Chase", near)
+					if math.random() < aggChance then
+						-- Check if target is in exclusion zone before chasing
+						local thrp = getCharHRP(near)
+						if thrp then
+							local inZone, zWeight, zone = checkTargetInExclusionZone(entry, thrp.Position)
+							if inZone and zWeight >= 80 then
+								-- Target in hard-blocked zone, don't aggro
+							else
+								entry.Target = near
+								self:_setState(entry, "Chase")
+								-- Pack animals alert nearby allies when they spot a target
+								self:_signalPack(entry, "Chase", near)
+							end
 						end
 					end
 				end
@@ -1063,7 +1075,46 @@ function AIService:_stepOne(entry: AIEntry)
 
 		local step = math.min(runMaxDist, math.max(20, fearDist))
 		local y = territoryY(entry.Territory, pos.Y)
-		local fleePos = Vector3.new(pos.X + away.X * step, y, pos.Z + away.Z * step)
+
+		-- FleeStyle: "straight" (default), "zigzag", "scatter"
+		local fleeStyle = entry.P.FleeStyle or "straight"
+
+		local fleeX = pos.X + away.X * step
+		local fleeZ = pos.Z + away.Z * step
+
+		if fleeStyle == "zigzag" then
+			-- Alternate perpendicular offsets to dodge in a zigzag pattern
+			if not entry.FleeZigDir then entry.FleeZigDir = 1 end
+			if not entry.FleeNextZig then entry.FleeNextZig = 0 end
+
+			if t >= entry.FleeNextZig then
+				entry.FleeZigDir = -entry.FleeZigDir
+				entry.FleeNextZig = t + 0.4 + math.random() * 0.4 -- flip every 0.4-0.8s
+			end
+
+			-- Perpendicular vector (rotate 90 degrees on XZ plane)
+			local perpX = -away.Z
+			local perpZ = away.X
+			local zigOffset = entry.FleeZigDir * (step * 0.35) -- 35% of step sideways
+
+			fleeX = fleeX + perpX * zigOffset
+			fleeZ = fleeZ + perpZ * zigOffset
+
+		elseif fleeStyle == "scatter" then
+			-- Random angle offset each tick: flee roughly away but with ±60° scatter
+			local scatterAngle = math.rad(math.random(-60, 60))
+			local cosA = math.cos(scatterAngle)
+			local sinA = math.sin(scatterAngle)
+
+			-- Rotate the away vector by scatterAngle on XZ plane
+			local rotX = away.X * cosA - away.Z * sinA
+			local rotZ = away.X * sinA + away.Z * cosA
+
+			fleeX = pos.X + rotX * step
+			fleeZ = pos.Z + rotZ * step
+		end
+
+		local fleePos = Vector3.new(fleeX, y, fleeZ)
 
 		moveToward(entry, fleePos)
 		safeSetAnim(entry, "Run")
@@ -1121,6 +1172,18 @@ function AIService:_stepOne(entry: AIEntry)
 
 	---------- RETURN ----------
 	if entry.State == "Return" then
+		-- Fearful proximity flee: even while returning, flee if player gets close
+		if entry.PersonalityName == "Fearful" then
+			local near, nearDist = pickNearestPlayer(pos, fearDist)
+			if near and nearDist <= fearDist then
+				entry.FleeFrom = near
+				entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 2.5)
+				self:_setState(entry, "Flee")
+				self:_signalPack(entry, "Flee")
+				return
+			end
+		end
+
 		entry.Humanoid.WalkSpeed = walkSpeed
 
 		local terr = entry.Territory
@@ -1160,6 +1223,16 @@ function AIService:_stepOne(entry: AIEntry)
 		end
 
 		local d = (thrp.Position - pos).Magnitude
+
+		-- Fearful proximity flee: if target gets within FearDistance, abandon attack and flee
+		if entry.PersonalityName == "Fearful" and d <= fearDist then
+			entry.Target = nil
+			entry.FleeFrom = target
+			entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 2.5)
+			self:_setState(entry, "Flee")
+			self:_signalPack(entry, "Flee")
+			return
+		end
 
 		-- Recently damaged = committed to chase for at least 3 seconds (no give-up rolls)
 		local recentlyDamaged = (t - entry.LastDamagedAt) < 3.0

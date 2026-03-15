@@ -698,6 +698,12 @@ function BrainrotService:_spawnOne(zoneRt: ZoneRuntime): EnemyRuntime?
 		model:SetAttribute("VariantNameTag", variant.NameTag)
 	end
 
+	-- Propagate special combat flags from BrainrotConfig to model attributes
+	local cfgEntry = getBrainrotConfig()[brainrotName]
+	if cfgEntry and cfgEntry.IgnoreKnockbackInvuln then
+		model:SetAttribute("IgnoreKnockbackInvuln", true)
+	end
+
 	local currentAnim = ensureCurrentAnimation(model)
 	currentAnim.Value = "Idle"
 

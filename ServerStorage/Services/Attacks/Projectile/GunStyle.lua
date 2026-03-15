@@ -102,6 +102,11 @@ function GunStyle:Execute(entry: any, target: any, services: any, moveConfig: an
 			-- Check if we hit the target's character
 			local hitModel = result.Instance:FindFirstAncestorOfClass("Model")
 			if hitModel and hitModel == targetChar then
+				-- Check if target is knocked back (invulnerable)
+				if services and services.KnockbackService
+					and services.KnockbackService:IsKnockedBack(target) then
+					continue
+				end
 				pcall(function()
 					local armorSvc = services and services.ArmorService
 					if armorSvc and target then

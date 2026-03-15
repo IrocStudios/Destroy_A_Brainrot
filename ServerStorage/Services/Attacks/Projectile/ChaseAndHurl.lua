@@ -119,6 +119,11 @@ function ChaseAndHurl:Execute(entry: any, target: any, services: any, moveConfig
 	end
 
 	local function applyDamageToPlayer(hitPlayer: Player)
+		-- Check if target is knocked back (invulnerable)
+		if services and services.KnockbackService
+			and services.KnockbackService:IsKnockedBack(hitPlayer) then
+			return
+		end
 		pcall(function()
 			local hitChar = hitPlayer.Character
 			if not hitChar then return end

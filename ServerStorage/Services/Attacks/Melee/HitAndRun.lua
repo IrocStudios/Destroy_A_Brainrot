@@ -35,6 +35,12 @@ function HitAndRun:Execute(entry: any, target: any, services: any, moveConfig: a
 	local range = (moveConfig and moveConfig.Range) or 6
 	if d > range * 1.5 then return end
 
+	-- Check if target is knocked back (invulnerable)
+	if services and services.KnockbackService
+		and services.KnockbackService:IsKnockedBack(target) then
+		return
+	end
+
 	-- Deal damage
 	local baseDamage = 10
 	if entry.EnemyInfo then

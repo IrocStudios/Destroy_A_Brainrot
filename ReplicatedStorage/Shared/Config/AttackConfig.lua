@@ -105,6 +105,19 @@ local AttackConfig = {
 			BounceDamping = 0,
 			Damage = nil,
 		},
+		Waterball = {
+			Asset = "Waterball",
+			Speed = 65,
+			MaxRange = 75,
+			Gravity = true,
+			ArcHeight = 0.18,
+			ArcHeightCap = 10,
+			Size = Vector3.new(1.8, 1.8, 1.8),
+			Bounce = false,
+			BounceCount = 0,
+			BounceDamping = 0,
+			Damage = nil,
+		},
 	},
 
 	----------------------------------------------------------------------

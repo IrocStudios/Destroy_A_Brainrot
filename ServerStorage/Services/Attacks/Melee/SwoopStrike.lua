@@ -84,6 +84,13 @@ function SwoopStrike:Execute(entry: any, target: any, services: any, moveConfig:
 	local range = (moveConfig and moveConfig.Range) or 15
 
 	if d <= range then
+		-- Check if target is knocked back (invulnerable)
+		if services and services.KnockbackService
+			and services.KnockbackService:IsKnockedBack(target) then
+			if loco and type(loco.EndDive) == "function" then loco:EndDive(entry) end
+			return
+		end
+
 		local baseDamage = 10
 		if entry.EnemyInfo then
 			local dmg = entry.EnemyInfo:GetAttribute("AttackDamage")

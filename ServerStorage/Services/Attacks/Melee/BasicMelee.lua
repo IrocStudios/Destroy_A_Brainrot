@@ -24,6 +24,13 @@ function BasicMelee:Execute(entry: any, target: any, services: any, moveConfig: 
 	local targetHum = targetChar:FindFirstChildOfClass("Humanoid")
 	if not targetHum or targetHum.Health <= 0 then return end
 
+	-- Check if target is knocked back (invulnerable) — skip if brainrot ignores it
+	local ignoreInvuln = entry.Model and entry.Model:GetAttribute("IgnoreKnockbackInvuln")
+	if not ignoreInvuln and services and services.KnockbackService
+		and services.KnockbackService:IsKnockedBack(target) then
+		return
+	end
+
 	-- Calculate damage
 	local baseDamage = 10
 	local enemyInfo = entry.EnemyInfo
@@ -47,6 +54,18 @@ function BasicMelee:Execute(entry: any, target: any, services: any, moveConfig: 
 			targetHum:TakeDamage(finalDamage)
 		end
 	end)
+
+	-- Apply knockback if configured (opt-in via MoveOverrides)
+	local knockbackCfg = moveConfig and moveConfig.Knockback
+	if knockbackCfg and services and services.KnockbackService then
+		local ignoreActive = entry.Model and entry.Model:GetAttribute("IgnoreKnockbackInvuln") or false
+		services.KnockbackService:ApplyKnockback(target, knockbackCfg.Type or "push", {
+			originPosition = entry.HRP and entry.HRP.Position or nil,
+			magnitude = knockbackCfg.Magnitude,
+			ragdollDuration = knockbackCfg.RagdollDuration,
+			ignoreActiveKnockback = ignoreActive,
+		})
+	end
 end
 
 function BasicMelee:GetAnimationName(): string

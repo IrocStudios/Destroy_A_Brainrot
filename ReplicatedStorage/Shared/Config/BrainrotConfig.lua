@@ -156,7 +156,7 @@ local BrainrotConfig = {
 	["Garamararam"] = {
 		DisplayName = "Garamararam",
 
-		Health = 250,
+		Health = 200,
 		Walkspeed = 6,
 		Runspeed = 12,           -- chase speed
 
@@ -193,6 +193,29 @@ local BrainrotConfig = {
 			CorneredAggression = 1.0,
 			LeashStrength = 0.3,       -- will leave territory to chase
 		},
+
+		MoveOverrides = {
+			BasicMelee = {
+				Knockback = {
+					Type = "push",          -- small shove on regular hit
+					Magnitude = 40,
+					RagdollDuration = 0,    -- no ragdoll, just a push
+				},
+			},
+			HeavyMelee = {
+				WindupTime = 1.0,       -- slow charge-up headbutt
+				DamageMult = 3.0,       -- devastating hit
+				Range = 8,              -- longer reach (charge momentum)
+				Knockback = {
+					Type = "fling",         -- BIG exaggerated launch
+					Magnitude = 140,        -- massive force
+					RagdollDuration = 3.0,  -- 3 second ragdoll
+				},
+			},
+		},
+
+		-- Garamararam ignores knockback invulnerability — keeps ramming while you're down
+		IgnoreKnockbackInvuln = true,
 	},
 
 	-----------------------------------------------------------------------
@@ -204,7 +227,7 @@ local BrainrotConfig = {
 	["Burbaloni_Loliloli"] = {
 		DisplayName = "Burbaloni Loliloli",
 
-		Health = 300,
+		Health = 350,
 		Walkspeed = 8,
 		Runspeed = 14,
 
@@ -215,7 +238,7 @@ local BrainrotConfig = {
 		AttackRange = 6,
 		AttackCooldown = 1.4,
 
-		Price = 600,
+		Price = 1500,
 
 		RarityName = "Common",
 		Personality = "Territorial",
@@ -330,6 +353,121 @@ local BrainrotConfig = {
 	},
 
 
+
+	-----------------------------------------------------------------------
+	-- Trippi Troppi — shrimp-cat water sentry
+	-- Lives in packs. Stands still and rapid-fires waterballs from long
+	-- range (every 0.5–1.5s). Low damage per hit but high volume.
+	-- If a player gets within 25 studs the whole pack scatters, then
+	-- repositions and resumes firing. No melee at all.
+	-----------------------------------------------------------------------
+	["Trippi_Troppi"] = {
+		DisplayName = "Trippi Troppi",
+
+		Health = 200,
+		Walkspeed = 16,
+		Runspeed = 25,
+
+		Attackspeed = 20,
+		HealRate = 3,
+
+		AttackDamage = 5,
+		AttackRange = 70,
+		AttackCooldown = 1.0,
+
+		Price = 750,
+
+		RarityName = "Common",
+		Personality = "Fearful",
+		LocomotionType = "Walk",
+
+		-- Ranged only — no melee, pure sentry
+		AttackMoves = { "StandAndHurl" },
+
+		PersonalityOverrides = {
+			AggroDistance = 80,        -- spots threats from far away
+			ChaseRange = 20,          -- never chases
+			AttackChance = 0.08,      -- fires when enemy in range, not aggressive
+			RunChance = 0.95,         -- almost always runs when close
+			RunWhenAttacked = 0.95,
+			FearDistance = 25,         -- scatter trigger distance
+			FearTime = 3.0,
+			Forgive = 0.90,
+			ForgiveTime = 5,          -- quick to forget and resettle
+			PreferRanged = 1.0,       -- always ranged, never melee
+			HeavyAttackBias = 0.0,
+			RetaliateOnDamage = false, -- doesn't fight back, just runs
+			RetaliateAggression = 0.0,
+			PursuitTenacity = 0.0,    -- never pursues
+			CorneredAggression = 0.15, -- even cornered, tries to flee
+			FleeStyle = "scatter",    -- scatter in random directions
+		},
+
+		MoveOverrides = {
+			StandAndHurl = {
+				Range = 70,
+				Projectile = "Waterball",
+				Spread = 2,            -- pretty accurate
+				Cooldown = 0.8,        -- rapid fire (~0.5-1.5s with windup)
+				WindupTime = 0.3,
+				MinRange = 25,         -- won't shoot if player is within 25 studs (flee instead)
+			},
+		},
+
+		-- Pack behavior: scatter together when one flees
+		PackBehavior = {
+			Enabled = true,
+			SignalRange = 0.80,
+			ShareStates = { "Flee" },
+			PackJoinChance = 0.90, -- very likely to scatter together
+		},
+
+		Variants = {
+			{
+				Name = "Small",
+				NameTag = "(Small)",
+				Weight = 60,
+				SizeMultiplier = 0.5,
+				SizeTier = "baby",
+				StatOverrides = {
+					AttackDamage = 0.6, -- slightly less damage
+					Health = 0.7,
+				},
+				VariantPersonalityOverrides = {
+					RunChance = 0.98,
+					RunWhenAttacked = 0.98,
+				},
+			},
+			{
+				Name = "Normal",
+				Weight = 30,
+				-- No overrides: uses base config as-is
+			},
+			{
+				Name = "Big",
+				NameTag = "(Big)",
+				Weight = 10,
+				SizeMultiplier = 1.4,
+				SizeTier = "big",
+				StatOverrides = {
+					AttackDamage = 2.0,   -- 2x damage
+					Health = 2.0,         -- 2x health
+				},
+				VariantMoveOverrides = {
+					StandAndHurl = {
+						ProjectileCount = 1,
+						Cooldown = 1.0,   -- slightly slower
+						WindupTime = 0.4,
+					},
+				},
+				VariantPersonalityOverrides = {
+					RunChance = 0.80,     -- slightly braver
+					RunWhenAttacked = 0.85,
+					CorneredAggression = 0.30,
+				},
+			},
+		},
+	},
 
 	-----------------------------------------------------------------------
 	-- Example brainrots (edit/add as needed)
