@@ -1723,12 +1723,13 @@ function AIService:_stepOne(entry: AIEntry)
 			return
 		end
 
-		moveToward(entry, entry.ReturnTarget)
+		local returnPos = entry.ReturnTarget
+		moveToward(entry, returnPos)
 		safeSetAnim(entry, "Walk")
 
 		-- Arrival check: reached return target OR back inside territory
 		local dToTarget = math.sqrt(
-			(entry.ReturnTarget.X - pos.X)^2 + (entry.ReturnTarget.Z - pos.Z)^2
+			(returnPos.X - pos.X)^2 + (returnPos.Z - pos.Z)^2
 		)
 		local insideTerritory = entry.Territory and isInsideTerritoryXZ(entry.Territory, pos)
 		if dToTarget <= 5 or insideTerritory then
