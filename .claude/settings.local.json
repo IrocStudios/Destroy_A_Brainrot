@@ -17,7 +17,32 @@
       "Bash(lua:*)",
       "mcp__Roblox_Studio__get_console_output",
       "mcp__Roblox_Studio__run_script_in_play_mode",
-      "mcp__Roblox_Studio__start_stop_play"
+      "mcp__Roblox_Studio__start_stop_play",
+      "Bash(find:*)",
+      "Bash(xargs grep -l \"GetFunction.*WeaponAction\")",
+      "Bash(file \"C:/Users/ZRDes/Downloads/Brainrot_Folder/ServerStorage/Weapons/\"*)",
+      "Bash(xargs grep -l \"RarityConfig\")",
+      "Bash(ls -lt \"C:/Users/ZRDes/.claude/projects/C--Users-ZRDes-Downloads-Brainrot-Folder/\"*.jsonl)",
+      "Bash(git log --all --oneline --grep=\"test\\\\|buy\\\\|dev\\\\|purchase\" -i)",
+      "Bash(git log --all --oneline --grep=\"testbuy\\\\|test_buy\\\\|grant.*test\\\\|dev.*buy\" -i)",
+      "Bash(xargs grep -l \"testbuy\\\\|test_buy\\\\|devbuy\\\\|dev.*weapon\")",
+      "Bash(grep -B 5 -A 15 \"buySpeed\" ServerStorage/Services/*.lua)",
+      "Bash(xargs grep -l \"buySpeed\")",
+      "Bash(xargs grep -l \"weight\\\\|loot\\\\|probability\\\\|weighted\")",
+      "Bash(rojo sourcemap default.project.json --output sourcemap.json)",
+      "Bash(xargs grep -l \"Template_Gift\\\\|TemplateGift\")",
+      "Bash(xargs grep -l \"GiftCard\\\\|Template_Gift\")",
+      "Bash(xargs grep -l \"GiftInventory.*populate\\\\|Template.*Gift\\\\|GiftCard\")",
+      "Bash(xargs grep -l \"Backpack.*Frame\\\\|resources.*Template_Weapon\")",
+      "Bash(xargs grep -l \"Common.*UIGradient\\\\|Uncommon.*UIGradient\")",
+      "Bash(sed -i '1217s/-- Apply per-brainrot move overrides/-- Apply per-brainrot + variant move overrides/' ServerStorage/Services/AIService.lua)",
+      "Bash(sed -i '1219s/moveCfg = applyMoveOverrides\\(bName, moveName :: string, moveCfg\\)/local vName = entry.Model:GetAttribute\\(\"\"VariantName\"\"\\)\\\\n\\\\t\\\\t\\\\t\\\\t\\\\tmoveCfg = applyMoveOverrides\\(bName, moveName :: string, moveCfg, vName\\)/' ServerStorage/Services/AIService.lua)",
+      "Bash(grep -r \"ExplodeOnImpact\\\\|_applyExplosionDamage\\\\|BlastRadius\" /c/Users/ZRDes/Downloads/Brainrot_Folder --include=*.lua)",
+      "Bash(rojo serve:*)",
+      "Bash(tasklist)",
+      "Bash(taskkill /PID 13416 /F)",
+      "Bash(taskkill //PID 13416 //F)",
+      "Bash(grep -c \"^end$\" ServerStorage/Services/AIService.lua)"
     ]
   }
 }

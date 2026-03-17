@@ -180,6 +180,17 @@ local AttackConfig = {
 			WindupTime = 1.0,
 			DamageMult = 2.2,
 		},
+		Lunge = {
+			Type = "Melee",
+			Weight = "Heavy",
+			Range = 18,           -- gap-closer range (6-18 studs)
+			Cooldown = 3.5,
+			WindupTime = 0.4,     -- short crouch before leap
+			DamageMult = 1.8,
+			LeapHeight = 12,      -- low arc, forward-biased
+			LeapSpeed = 55,       -- studs/sec forward velocity
+			HitRadius = 10,       -- landing hit detection radius
+		},
 
 		---------- PROJECTILE ----------
 		-- Spread: accuracy deviation in studs (0 = perfect aim, higher = worse)
