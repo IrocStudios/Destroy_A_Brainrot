@@ -1747,70 +1747,84 @@ function AIService:_stepOne(entry: AIEntry)
 
 		-- Attack or chase (melee range)
 		if d <= attackRange then
-			-- RE-EVALUATE: pick best attack move
-			self:_setState(entry, "Attack")
-			entry.Humanoid.WalkSpeed = 0
-			entry.Humanoid:Move(Vector3.zero, false)
-			if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
-				entry.Locomotion:Stop(entry)
-			end
-
+			-- Peek at move config to check for NoStop (drive-by attacks)
+			local moveName, moveMod, moveCfg
 			if t >= entry.NextAttackAt then
-				local moveName, moveMod, moveCfg = AttackRegistry:PickMove(
+				moveName, moveMod, moveCfg = AttackRegistry:PickMove(
 					entry, target, d, entry.P, entry.AttackMoves
 				)
-
 				if moveMod and moveCfg then
-					-- Apply per-brainrot + variant move overrides
 					local bName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
 					local vName = entry.Model:GetAttribute("VariantName")
 					moveCfg = applyMoveOverrides(bName, moveName :: string, moveCfg, vName)
+				end
+			end
 
-					-- Set animation (moveConfig AnimationKey override > module default)
-					local animName = "Attack"
+			local noStop = moveCfg and moveCfg.NoStop
+
+			if noStop then
+				-- Drive-by: stay in Chase, keep moving, fire damage without stopping
+				self:_setState(entry, "Chase")
+				entry.Humanoid.WalkSpeed = runSpeed
+				safeSetAnim(entry, "Run")
+				moveToward(entry, thrp.Position)
+			else
+				-- Normal: stop and attack
+				self:_setState(entry, "Attack")
+				entry.Humanoid.WalkSpeed = 0
+				entry.Humanoid:Move(Vector3.zero, false)
+				if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+					entry.Locomotion:Stop(entry)
+				end
+			end
+
+			if moveMod and moveCfg then
+				-- Set animation
+				local animName = if noStop then "Run" else "Attack"
+				if not noStop then
 					if moveCfg.AnimationKey then
 						animName = "attack_" .. moveCfg.AnimationKey
 					elseif type(moveMod.GetAnimationName) == "function" then
 						animName = moveMod:GetAnimationName()
 					end
-					safeSetAnim(entry, animName)
-
-					-- Calculate cooldown
-					local cd = moveCfg.Cooldown or self.Config.DefaultAttackCooldown
-					local effectiveMult = entry.Model:GetAttribute("EffectiveMultiplier")
-					if typeof(effectiveMult) == "number" and effectiveMult > 0 then
-						cd = cd / effectiveMult
-					end
-					entry.NextAttackAt = t + cd
-
-					-- Record usage for per-move cooldown
-					AttackRegistry:RecordUse(entry, moveName :: string)
-
-					-- Execute the attack (may yield for windup)
-					task.spawn(function()
-						moveMod:Execute(entry, target, self.Services, moveCfg)
-					end)
-
-					-- Pack wolves: re-roll hunt angle so next approach comes from a different side
-					if entry.HuntAngle then
-						entry.HuntAngle = math.random() * math.pi * 2
-					end
-				else
-					-- No valid move, fallback to basic damage
-					safeSetAnim(entry, "Attack")
-					entry.NextAttackAt = t + self.Config.DefaultAttackCooldown
-					pcall(function()
-						local armorSvc = self.Services and self.Services.ArmorService
-						if armorSvc and target then
-							local absorbed, overflow = armorSvc:DamageArmor(target, attackDamage)
-							if overflow > 0 then
-								thum:TakeDamage(overflow)
-							end
-						else
-							thum:TakeDamage(attackDamage)
-						end
-					end)
 				end
+				safeSetAnim(entry, animName)
+
+				-- Calculate cooldown
+				local cd = moveCfg.Cooldown or self.Config.DefaultAttackCooldown
+				local effectiveMult = entry.Model:GetAttribute("EffectiveMultiplier")
+				if typeof(effectiveMult) == "number" and effectiveMult > 0 then
+					cd = cd / effectiveMult
+				end
+				entry.NextAttackAt = t + cd
+
+				-- Record usage for per-move cooldown
+				AttackRegistry:RecordUse(entry, moveName :: string)
+
+				-- Execute the attack (may yield for windup)
+				task.spawn(function()
+					moveMod:Execute(entry, target, self.Services, moveCfg)
+				end)
+
+				-- Pack wolves: re-roll hunt angle so next approach comes from a different side
+				if entry.HuntAngle then
+					entry.HuntAngle = math.random() * math.pi * 2
+				end
+			elseif not noStop and t >= entry.NextAttackAt then
+				-- No valid move, fallback to basic damage (only for stop-attacks)
+				safeSetAnim(entry, "Attack")
+				entry.NextAttackAt = t + self.Config.DefaultAttackCooldown
+				pcall(function()
+					local armorSvc = self.Services and self.Services.ArmorService
+					if armorSvc and target then
+						local absorbed, overflow = armorSvc:DamageArmor(target, attackDamage)
+						if overflow > 0 then
+							thum:TakeDamage(overflow)
+						end
+					else
+						thum:TakeDamage(attackDamage)
+					end
+				end)
 			end
 		else
 			-- Chase: move toward target

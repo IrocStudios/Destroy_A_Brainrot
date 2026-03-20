@@ -723,6 +723,90 @@ local BrainrotConfig = {
 	-- Zone Configuration.Enemies must reference these keys
 	-----------------------------------------------------------------------
 
+	-----------------------------------------------------------------------
+	-- Boneca_Ambalabu — Wheel Frog (Level 2, first enemy)
+	-- Fast roller: always moving, drive-by bites, panics on damage.
+	-- No pack behavior. NoStop = true means it never pauses to attack.
+	-----------------------------------------------------------------------
+	["Boneca_Ambalabu"] = {
+		DisplayName = "Boneca Ambalabu",
+
+		Health = 200,
+		Walkspeed = 18,           -- fast idle rolling
+		Runspeed = 32,            -- very fast chase AND flee
+
+		Attackspeed = 32,
+		HealRate = 0,
+
+		AttackDamage = 7,         -- just below Pipi_Kiwi's 8
+		AttackRange = 6,
+		AttackCooldown = 0.9,     -- quick snap
+
+		Price = 3500,             -- below Pipi_Kiwi ($5000), above Burbaloni ($2750)
+		RarityName = "Rare",
+
+		Personality = "Skittish",
+
+		AttackMoves = { "BasicMelee" },
+		LocomotionType = "Walk",
+
+		PersonalityOverrides = {
+			IdleFrequency = { 0.8, 2.0 },     -- short idle pauses (always rolling)
+			IdleActions = { "walk", "walk", "walk", "fidget" },
+
+			AggroDistance = 60,
+			ChaseRange = 100,
+			AttackChance = 0.55,               -- bold — goes in unprovoked
+
+			RunChance = 0.95,                  -- almost always flees on damage
+			RunWhenAttacked = 0.95,            -- first hit = gone
+			RetaliateOnDamage = false,         -- never fights back
+			RetaliateAggression = 0.0,
+
+			FearTime = 3.5,                    -- runs for a good while
+			FearDistance = 40,
+			RunMaxDistance = 140,
+
+			FleeStyle = "zigzag",              -- hard to chase down
+			PursuitTenacity = 0.50,
+			CorneredAggression = 0.30,         -- even cornered, prefers to flee
+			TerritoryTenacity = 0.20,          -- not territorial at all
+			TerritoryLeashPct = 0.40,
+			LeashStrength = 0.30,
+
+			SafeZonePull = 0.10,               -- barely uses den — always roaming
+			PatrolRadius = 40,                 -- huge wander area
+		},
+
+		AggroCurveOverrides = {
+			IdleAggro = 8,                     -- alert, looking for action
+			DamageGain = 3,                    -- damage scares, doesn't enrage
+			ProximityRate = 25,                -- builds fast from seeing players
+			TerritoryRate = 5,                 -- not territorial
+			CorneredRate = 4,
+			DecayRate = 8.0,                   -- aggro drops very fast
+			TerritoryDecayMult = 1.5,
+			OutOfSightDecay = 10,              -- forgets quickly
+			DecayDelay = 2,                    -- starts forgetting fast
+			AccelDecayMult = 2.5,
+			ChaseThreshold = 18,               -- very easy to trigger
+			PursuitThreshold = 40,
+			BerserkThreshold = 95,             -- basically never berserks
+			FleeInversion = false,
+			FleeThreshold = 0,
+		},
+
+		MoveOverrides = {
+			BasicMelee = {
+				WindupTime = 0.06,             -- near-instant snap
+				DamageMult = 1.0,
+				Cooldown = 0.9,
+				Range = 6,
+				NoStop = true,                 -- drive-by: no pause, keep rolling
+			},
+		},
+	},
+
 	["Default2"] = {
 		DisplayName = "Default 2",
 		Health = 140,
