@@ -32,9 +32,9 @@ export type WalkState = {
 }
 
 local RECOMPUTE_INTERVAL = 0.5       -- seconds between path re-computes
-local RECOMPUTE_DIST_THRESHOLD = 8   -- re-compute if target moved this far
+local RECOMPUTE_DIST_THRESHOLD = 4   -- re-compute if target moved this far (1 voxel)
 local WAYPOINT_REACH_DIST = 3        -- how close to a waypoint before advancing
-local DIRECT_MOVE_DIST = 12          -- within this range, skip pathfinding and MoveTo directly
+local DIRECT_MOVE_DIST = 16          -- within this range, skip pathfinding and MoveTo directly
 
 ----------------------------------------------------------------------
 -- Helpers

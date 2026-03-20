@@ -26,7 +26,7 @@ local AttackRegistry = require(
 
 type Services = { [string]: any }
 
-type AIStateName = "Idle" | "Wander" | "Chase" | "Attack" | "Flee" | "Return" | "Dead" | "WaitAtEdge" | "Surround"
+type AIStateName = "Idle" | "Wander" | "Chase" | "Attack" | "Flee" | "Return" | "Dead" | "WaitAtEdge"
 
 type AIEntry = {
 	Id: string,
@@ -85,10 +85,8 @@ type AIEntry = {
 	StuckHopStage: number, -- 0=none, 1=baby hop done, 2=medium hop done, 3=big hop done
 	LastHopAt: number, -- timestamp of last hop (cooldown)
 
-	-- Surround state (pack wolves)
-	SurroundAngle: number, -- assigned angle (radians) around target
-	SurroundCommitAt: number, -- timestamp when surround phase ends and attack begins
-	SurroundTarget: Vector3?, -- the computed position to walk toward
+	-- Pack hunt offset (pack wolves): random angle for approach direction
+	HuntAngle: number?,
 
 	-- Flee evasion state
 	FleeZigDir: number, -- +1 or -1, alternates for zigzag
@@ -306,8 +304,8 @@ local function pTable(P: { [string]: any }, key: string): { [string]: any }?
 	return type(v) == "table" and v or nil
 end
 
--- Surround constants
-local SURROUND_RADIUS = 14 -- (unused directly — approach distance derived from attackRange)
+-- Pack hunt offset (studs from target) for pack wolves approaching from random sides
+local HUNT_OFFSET = 4
 
 --//////////////////////////////
 -- Resolve brainrot attack moves + locomotion type
@@ -673,10 +671,8 @@ function AIService:Register(brainrotId: string, model: Model)
 		StuckHopStage = 0,
 		LastHopAt = 0,
 
-		-- Surround state
-		SurroundAngle = 0,
-		SurroundCommitAt = 0,
-		SurroundTarget = nil,
+		-- Pack hunt angle (nil = not a pack wolf)
+		HuntAngle = nil,
 
 		-- Aggro meter
 		Aggro = 0,
@@ -698,6 +694,12 @@ function AIService:Register(brainrotId: string, model: Model)
 	local variantName = model:GetAttribute("VariantName")
 	entry.AC = resolveAggroCurve(P, brainrotName, variantName)
 	entry.Aggro = entry.AC.IdleAggro or 0
+
+	-- Pack wolves get a random hunt angle for approach direction
+	local bCfgPack = getBrainrotConfig()[brainrotName]
+	if bCfgPack and type(bCfgPack.PackBehavior) == "table" and bCfgPack.PackBehavior.Enabled then
+		entry.HuntAngle = math.random() * math.pi * 2
+	end
 
 	-- Damage reaction via health drops
 	table.insert(entry.Conn, hum.HealthChanged:Connect(function(h: number)
@@ -770,9 +772,6 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		safeSetAnim(entry, "Attack")
 	elseif state == "Flee" then
 		safeSetAnim(entry, "Run")
-	elseif state == "Surround" then
-		safeSetAnim(entry, "Walk")
-		entry.SurroundTarget = nil -- will be computed in _stepOne
 	elseif state == "Return" then
 		entry.Target = nil
 		entry.WanderTarget = nil
@@ -940,7 +939,7 @@ end
 
 function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?)
 	-- Baby/small variants can't rally the pack — they flee alone
-	-- BUT they trigger ProtectBaby instead (handled in _onDamaged)
+	-- (they trigger ProtectBaby instead, handled in _onDamaged)
 	local sizeTier = entry.Model and entry.Model:GetAttribute("SizeTier")
 	if sizeTier == "baby" or sizeTier == "small" then return end
 
@@ -970,60 +969,34 @@ function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?
 		radius = math.max(tSize.X, tSize.Z) * signalFrac
 	end
 
-	-- Chase join chance: neighbors aren't guaranteed to fully commit.
-	-- Closer neighbors are more likely to join. Base chance from config (default 0.6).
-	local baseJoinChance = packCfg.PackJoinChance or 0.6
-
-	-- Signal nearby brainrots in same zone
+	-- Signal nearby same-species brainrots
 	for _, other in pairs(self._active) do
 		if other.Id == entry.Id then continue end
 		if other.State == "Dead" then continue end
 		if other.ZoneName ~= entry.ZoneName then continue end
 		if not other.HRP or not other.HRP.Parent then continue end
-
 		local dist = (other.HRP.Position - entry.HRP.Position).Magnitude
 		if dist > radius then continue end
 
-		-- Distance falloff: closer = more likely to join (100% at 0, baseJoinChance at edge)
-		local distFactor = 1 - (dist / radius) -- 1.0 at center, 0.0 at edge
-		local joinChance = baseJoinChance + (1 - baseJoinChance) * distFactor * 0.5
-
-		if newState == "Surround" and target then
-			-- Surround signal: pack members enter surround state if not already engaged
-			if other.State == "Surround" or other.State == "Chase" or other.State == "Attack" then
-				continue
-			end
-			if math.random() > joinChance then continue end
-
-			other.Target = target
-			local thrp = getCharHRP(target)
-			if thrp then
-				other.SurroundAngle = self:_assignSurroundAngle(other, thrp.Position)
-				other._lastAngleReassign = now()
-				self:_setState(other, "Surround")
-			end
-
-		elseif newState == "Chase" and target then
+		if newState == "Chase" and target then
+			-- Already chasing this target? Skip
 			if other.State == "Chase" and other.Target == target then continue end
+			-- Already attacking? Don't interrupt
+			if other.State == "Attack" then continue end
 
-			-- Boost neighbor's aggro instead of forcing state
+			-- Boost aggro and force chase — simple, no probability
 			local otherAC = other.AC
 			local packGain = otherAC and otherAC.PackGain or 30
-			other.Aggro = math.clamp((other.Aggro or 0) + packGain * joinChance, 0, 100)
+			other.Aggro = math.clamp((other.Aggro or 0) + packGain, 0, 100)
+			other.Target = target
+			other.HuntAngle = math.random() * math.pi * 2 -- random approach side
+			self:_setState(other, "Chase")
 
-			-- If aggro exceeds chase threshold, engage
-			local chaseThreshold = otherAC and otherAC.ChaseThreshold or 35
-			if other.Aggro >= chaseThreshold then
-				other.Target = target
-				self:_setState(other, "Chase")
-			end
 		elseif newState == "Flee" then
 			if other.State ~= "Flee" then
-				-- Boost aggro (fear response)
 				local otherAC = other.AC
 				local packGain = otherAC and otherAC.PackGain or 30
 				other.Aggro = math.clamp((other.Aggro or 0) + packGain * 0.5, 0, 100)
-
 				other.FleeFrom = entry.FleeFrom
 				other.FleeUntil = now() + pNumber(other.P, "FearTime", 2.5)
 				self:_setState(other, "Flee")
@@ -1031,90 +1004,6 @@ function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?
 		end
 	end
 end
-
-----------------------------------------------------------------------
--- Surround behavior (pack wolves)
-----------------------------------------------------------------------
-
---- Check if this brainrot should use surround behavior.
---- Returns true if PackBehavior is enabled AND ShareStates includes "Surround".
-local function hasSurroundBehavior(brainrotName: string): boolean
-	local allCfg = getBrainrotConfig()
-	local bCfg = allCfg[brainrotName]
-	if not bCfg or type(bCfg.PackBehavior) ~= "table" or not bCfg.PackBehavior.Enabled then
-		return false
-	end
-	local shareStates = bCfg.PackBehavior.ShareStates
-	if type(shareStates) ~= "table" then return false end
-	for _, s in ipairs(shareStates) do
-		if s == "Surround" then return true end
-	end
-	return false
-end
-
---- Count how many same-species pack members are alive in this zone.
-function AIService:_countPackNearby(entry: AIEntry, radius: number): number
-	local brainrotName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
-	local count = 0
-	for _, other in pairs(self._active) do
-		if other.Id == entry.Id then continue end
-		if other.State == "Dead" then continue end
-		if other.ZoneName ~= entry.ZoneName then continue end
-		if not other.HRP or not other.HRP.Parent then continue end
-		local otherName = tostring(other.Model:GetAttribute("BrainrotName") or "Default")
-		if otherName ~= brainrotName then continue end
-		local dist = (other.HRP.Position - entry.HRP.Position).Magnitude
-		if dist <= radius then count += 1 end
-	end
-	return count
-end
-
---- Assign a surround angle that spreads pack members evenly around the target.
---- Looks at what angles other same-species members already hold and picks
---- the angle farthest from any taken angle.
-function AIService:_assignSurroundAngle(entry: AIEntry, targetPos: Vector3): number
-	local brainrotName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
-	local takenAngles: { number } = {}
-
-	for _, other in pairs(self._active) do
-		if other.Id == entry.Id then continue end
-		if other.State == "Dead" then continue end
-		if other.ZoneName ~= entry.ZoneName then continue end
-		if other.State ~= "Surround" and other.State ~= "Chase" and other.State ~= "Attack" then continue end
-		if not other.HRP or not other.HRP.Parent then continue end
-		local otherName = tostring(other.Model:GetAttribute("BrainrotName") or "Default")
-		if otherName ~= brainrotName then continue end
-
-		-- Use their current angle relative to target
-		local delta = other.HRP.Position - targetPos
-		local angle = math.atan2(delta.Z, delta.X)
-		table.insert(takenAngles, angle)
-	end
-
-	-- If no other pack members, pick angle opposite to our current position
-	if #takenAngles == 0 then
-		local delta = entry.HRP.Position - targetPos
-		-- Go to the opposite side
-		return math.atan2(delta.Z, delta.X) + math.pi
-	end
-
-	-- Find the largest angular gap and place ourselves in the middle of it
-	table.sort(takenAngles)
-	local bestGap = 0
-	local bestAngle = 0
-
-	for i = 1, #takenAngles do
-		local next = if i < #takenAngles then takenAngles[i + 1] else takenAngles[1] + math.pi * 2
-		local gap = next - takenAngles[i]
-		if gap > bestGap then
-			bestGap = gap
-			bestAngle = takenAngles[i] + gap * 0.5
-		end
-	end
-
-	return bestAngle
-end
-
 
 -- Returns how far (studs) this entry is beyond its territory edge.
 -- Returns 0 if inside territory, nil if no territory.
@@ -1484,7 +1373,7 @@ function AIService:_stepOne(entry: AIEntry)
 
 	-- Return overrides neutral states (with cooldown to prevent ping-pong)
 	if entry.State ~= "Return" and entry.State ~= "Chase" and entry.State ~= "Attack"
-		and entry.State ~= "WaitAtEdge" and entry.State ~= "Flee" and entry.State ~= "Surround" then
+		and entry.State ~= "WaitAtEdge" and entry.State ~= "Flee" then
 		if t >= (entry.ReturnCooldownUntil or 0) and self:_shouldReturn(entry) then
 			self:_setState(entry, "Return")
 		end
@@ -1518,9 +1407,8 @@ function AIService:_stepOne(entry: AIEntry)
 					entry.Target = near
 					self:_setState(entry, "Attack")
 
-				-- Aggro threshold reached: chase (or surround for pack wolves)
+				-- Aggro threshold reached: chase
 				elseif entry.Aggro >= chaseThreshold then
-					-- Check exclusion zone
 					local thrp = getCharHRP(near)
 					if thrp then
 						local inZone, zWeight, zone = checkTargetInExclusionZone(entry, thrp.Position)
@@ -1528,19 +1416,8 @@ function AIService:_stepOne(entry: AIEntry)
 							-- Target in hard-blocked zone, don't chase
 						else
 							entry.Target = near
-
-							-- Pack wolves with surround behavior: enter Surround
-							local bName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
-							if hasSurroundBehavior(bName)
-								and self:_countPackNearby(entry, 80) >= 1 then
-								entry.SurroundAngle = self:_assignSurroundAngle(entry, thrp.Position)
-								entry._lastAngleReassign = now()
-								self:_setState(entry, "Surround")
-								self:_signalPack(entry, "Surround", near)
-							else
-								self:_setState(entry, "Chase")
-								self:_signalPack(entry, "Chase", near)
-							end
+							self:_setState(entry, "Chase")
+							self:_signalPack(entry, "Chase", near)
 						end
 					end
 				end
@@ -1744,125 +1621,6 @@ function AIService:_stepOne(entry: AIEntry)
 		return
 	end
 
-	---------- SURROUND (pack wolves) ----------
-	-- Surround = Chase, but each wolf hunts from a different side.
-	-- Angle is assigned once on entry, reassigned only after landing a hit.
-	-- Falls through to Chase/Attack for all actual combat logic.
-	if entry.State == "Surround" then
-		local target = entry.Target
-		local thrp = target and getCharHRP(target) or nil
-		local thum = target and getCharHumanoid(target) or nil
-
-		if not thrp or not thum or thum.Health <= 0 then
-			entry.Target = nil
-			self:_setState(entry, "Idle")
-			return
-		end
-
-		local targetPos = thrp.Position
-		local d = (targetPos - pos).Magnitude
-
-		if d > chaseRange then
-			entry.Target = nil
-			self:_setState(entry, "Return")
-			return
-		end
-
-		-- Flee check (individual)
-		if (t - entry.LastDamagedAt) < 0.5 then
-			local runWhenAttacked = pNumber(entry.P, "RunWhenAttacked", 0.25)
-			if math.random() < runWhenAttacked then
-				entry.FleeFrom = target
-				entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 2.0)
-				self:_setState(entry, "Flee")
-				return
-			end
-		end
-
-		-- Hunt from assigned side: run at the player but offset by our angle
-		entry.Humanoid.WalkSpeed = runSpeed
-		safeSetAnim(entry, "Run")
-		local angle = entry.SurroundAngle or 0
-
-		-- Move toward a point 2 studs past the player on our angle line
-		-- so pathfinding naturally brings us in from that direction
-		local y = territoryY(entry.Territory, pos.Y)
-		local huntTarget = Vector3.new(
-			targetPos.X - math.cos(angle) * 2,
-			y,
-			targetPos.Z - math.sin(angle) * 2
-		)
-		moveToward(entry, huntTarget)
-
-		-- Attack logic: same as normal Chase/Attack, inline here for simplicity
-		if d <= attackRange and t >= entry.NextAttackAt then
-			local moveName, moveMod, moveCfg = AttackRegistry:PickMove(
-				entry, target, d, entry.P, entry.AttackMoves
-			)
-			if moveMod and moveCfg then
-				local bName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
-				local vName = entry.Model:GetAttribute("VariantName")
-				moveCfg = applyMoveOverrides(bName, moveName :: string, moveCfg, vName)
-
-				local animName = "Attack"
-				if moveCfg.AnimationKey then
-					animName = "attack_" .. moveCfg.AnimationKey
-				elseif type(moveMod.GetAnimationName) == "function" then
-					animName = moveMod:GetAnimationName()
-				end
-				safeSetAnim(entry, animName)
-
-				local cd = moveCfg.Cooldown or self.Config.DefaultAttackCooldown
-				local effectiveMult = entry.Model:GetAttribute("EffectiveMultiplier")
-				if typeof(effectiveMult) == "number" and effectiveMult > 0 then
-					cd = cd / effectiveMult
-				end
-				entry.NextAttackAt = t + cd
-				AttackRegistry:RecordUse(entry, moveName :: string)
-				task.spawn(function()
-					moveMod:Execute(entry, target, self.Services, moveCfg)
-				end)
-
-				-- After hitting: new angle so we come from a different side next time
-				entry.SurroundAngle = self:_assignSurroundAngle(entry, targetPos)
-			end
-
-		-- Lunge gap-closer when closing distance
-		elseif d > attackRange and t >= entry.NextAttackAt then
-			local moveName, moveMod, moveCfg = AttackRegistry:PickMove(
-				entry, target, d, entry.P, entry.AttackMoves
-			)
-			if moveMod and moveCfg and (moveCfg.Weight == "Heavy") then
-				local bName = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
-				local vName = entry.Model:GetAttribute("VariantName")
-				moveCfg = applyMoveOverrides(bName, moveName :: string, moveCfg, vName)
-
-				local animName = "Attack"
-				if moveCfg.AnimationKey then
-					animName = "attack_" .. moveCfg.AnimationKey
-				elseif type(moveMod.GetAnimationName) == "function" then
-					animName = moveMod:GetAnimationName()
-				end
-				safeSetAnim(entry, animName)
-
-				local cd = moveCfg.Cooldown or self.Config.DefaultAttackCooldown
-				local effectiveMult = entry.Model:GetAttribute("EffectiveMultiplier")
-				if typeof(effectiveMult) == "number" and effectiveMult > 0 then
-					cd = cd / effectiveMult
-				end
-				entry.NextAttackAt = t + cd
-				AttackRegistry:RecordUse(entry, moveName :: string)
-				task.spawn(function()
-					moveMod:Execute(entry, target, self.Services, moveCfg)
-				end)
-
-				entry.SurroundAngle = self:_assignSurroundAngle(entry, targetPos)
-			end
-		end
-
-		return
-	end
-
 	---------- CHASE / ATTACK ----------
 	if entry.State == "Chase" or entry.State == "Attack" then
 		local target = entry.Target
@@ -1987,10 +1745,6 @@ function AIService:_stepOne(entry: AIEntry)
 			end
 		end
 
-		-- Check if this brainrot uses surround behavior
-		local bNameForSurround = tostring(entry.Model:GetAttribute("BrainrotName") or "Default")
-		local usesSurround = hasSurroundBehavior(bNameForSurround)
-
 		-- Attack or chase (melee range)
 		if d <= attackRange then
 			-- RE-EVALUATE: pick best attack move
@@ -2037,14 +1791,9 @@ function AIService:_stepOne(entry: AIEntry)
 						moveMod:Execute(entry, target, self.Services, moveCfg)
 					end)
 
-					-- Pack wolves: after attacking, return to Surround with new angle
-					if usesSurround then
-						local thrpNow = getCharHRP(target)
-						if thrpNow then
-							entry.SurroundAngle = self:_assignSurroundAngle(entry, thrpNow.Position)
-							entry._lastAngleReassign = now()
-							self:_setState(entry, "Surround")
-						end
+					-- Pack wolves: re-roll hunt angle so next approach comes from a different side
+					if entry.HuntAngle then
+						entry.HuntAngle = math.random() * math.pi * 2
 					end
 				else
 					-- No valid move, fallback to basic damage
@@ -2064,19 +1813,22 @@ function AIService:_stepOne(entry: AIEntry)
 				end
 			end
 		else
-			-- Surround wolves: redirect to Surround state (it handles all approach/attack)
-			if usesSurround then
-				entry.SurroundAngle = entry.SurroundAngle or math.atan2(
-					pos.Z - thrp.Position.Z, pos.X - thrp.Position.X
+			-- Chase: move toward target
+			self:_setState(entry, "Chase")
+			entry.Humanoid.WalkSpeed = runSpeed
+			safeSetAnim(entry, "Run")
+
+			-- Pack wolves: offset target by HuntAngle so they approach from different sides
+			if entry.HuntAngle then
+				local y = territoryY(entry.Territory, pos.Y)
+				local huntPos = Vector3.new(
+					thrp.Position.X + math.cos(entry.HuntAngle) * HUNT_OFFSET,
+					y,
+					thrp.Position.Z + math.sin(entry.HuntAngle) * HUNT_OFFSET
 				)
-				entry._lastAngleReassign = now()
-				self:_setState(entry, "Surround")
+				moveToward(entry, huntPos)
 			else
-				-- Normal chase: beeline directly at target
-				self:_setState(entry, "Chase")
-				entry.Humanoid.WalkSpeed = runSpeed
 				moveToward(entry, thrp.Position)
-				safeSetAnim(entry, "Run")
 			end
 		end
 
@@ -2173,7 +1925,7 @@ end
 -- Velocity-based animation override: if the brainrot is physically not moving
 -- but has a movement animation playing, switch to Idle animation.
 -- This catches stuck-on-wall, pathfinding failure, territory edge, etc.
-local MOVE_VELOCITY_THRESHOLD = 0.5 -- studs/sec; below this = "not moving"
+local MOVE_VELOCITY_THRESHOLD = 1.0 -- studs/sec; below this = "not moving"
 
 function AIService:_velocityAnimCheck(entry: AIEntry)
 	if entry.State == "Dead" then return end
@@ -2212,11 +1964,11 @@ end
 -- Stage 2 → big hop (clears larger obstacles)
 -- Stage 3 → give up on current path, pick new destination
 
-local STUCK_TICKS_BABY    = 3   -- 0.3s stuck → tiny pop (clears <1 stud)
-local STUCK_TICKS_MEDIUM  = 10  -- 1.0s still stuck → medium hop
-local STUCK_TICKS_BIG     = 18  -- 1.8s still stuck → big hop
-local STUCK_TICKS_REPATH  = 26  -- 2.6s still stuck → abandon path
-local HOP_COOLDOWN        = 1.2 -- seconds between hops
+local STUCK_TICKS_BABY    = 8   -- 0.8s stuck → tiny pop (clears <1 stud)
+local STUCK_TICKS_MEDIUM  = 16  -- 1.6s still stuck → medium hop
+local STUCK_TICKS_BIG     = 25  -- 2.5s still stuck → big hop
+local STUCK_TICKS_REPATH  = 35  -- 3.5s still stuck → abandon path
+local HOP_COOLDOWN        = 2.0 -- seconds between hops
 
 -- Hop power per stage (JumpPower values)
 -- Stage 1 is a tiny pop — just enough to clear a seam/lip

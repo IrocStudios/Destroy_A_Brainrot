@@ -540,10 +540,10 @@ local BrainrotConfig = {
 		DisplayName = "Pipi Kiwi",
 
 		Health = 300,
-		Walkspeed = 13,           -- idle + surround speed
-		Runspeed = 21,            -- chase/attack commit speed
+		Walkspeed = 14,           -- idle patrol speed (+1)
+		Runspeed = 22,            -- chase/attack commit speed (+1)
 
-		Attackspeed = 21,
+		Attackspeed = 22,
 		HealRate = 0,
 
 		AttackDamage = 8,         -- low per-hit (pack compensates)
@@ -563,45 +563,44 @@ local BrainrotConfig = {
 			AggroDistance = 55,         -- pack notices you from decent range
 			ChaseRange = 120,          -- will chase fairly far once committed
 			AttackChance = 0.60,       -- aggressive on territory intrusion
-			RunChance = 0.65,          -- individually cowardly when damaged
-			RunWhenAttacked = 0.65,    -- flees when hit...
-			FearTime = 2.0,            -- ...but only briefly
-			FearDistance = 20,         -- doesn't run far
+			RunChance = 0.55,          -- individually flees when damaged
+			RunWhenAttacked = 0.55,    -- flees when hit...
+			FearTime = 1.5,            -- ...but only briefly
+			FearDistance = 18,         -- doesn't run far
 			RunMaxDistance = 60,
-			Forgive = 0.30,            -- doesn't forgive easily
+			Forgive = 0.30,
 			ForgiveTime = 15,
 			ForgiveDistance = 50,
 			RetaliateOnDamage = true,
-			RetaliateAggression = 0.40, -- often flees first, pack pulls back
-			PursuitTenacity = 0.70,    -- committed once chasing
+			RetaliateAggression = 0.50, -- more willing to fight back
+			PursuitTenacity = 0.75,    -- committed once chasing
 			HeavyAttackBias = 0.30,    -- ~30% lunge, ~70% bite
-			CorneredAggression = 0.95, -- fights hard when cornered
-			TerritoryTenacity = 0.90,  -- very protective of territory
-			TerritoryLeashPct = 0.30,  -- 30% beyond territory edge
-			LeashStrength = 0.50,      -- moderate pull back
-			FleeStyle = "straight",    -- individual flee, no scatter
-			PreferRanged = 0.0,        -- pure melee
-			SafeZonePull = 0.70,       -- wolves mostly hang out in their den
-			PatrolRadius = 18,         -- small wander radius (stay near den)
+			CorneredAggression = 0.95,
+			TerritoryTenacity = 0.90,
+			TerritoryLeashPct = 0.30,
+			LeashStrength = 0.50,
+			FleeStyle = "straight",
+			PreferRanged = 0.0,
+			SafeZonePull = 0.70,
+			PatrolRadius = 18,
 		},
 
-		-- Aggro curve: territory intrusion triggers surround, damage causes brief flee,
-		-- pack signal rapidly re-engages
+		-- Aggro curve: fast engage, pack signal instantly commits
 		AggroCurveOverrides = {
-			IdleAggro = 3,             -- slightly alert even idle
-			DamageGain = 15,           -- damage doesn't instantly enrage (flee first)
-			ProximityRate = 25,        -- builds from proximity
-			TerritoryRate = 12,        -- territory entry is a light signal, not instant aggro
+			IdleAggro = 5,             -- alert
+			DamageGain = 20,           -- damage builds aggro faster
+			ProximityRate = 30,        -- builds quickly from proximity
+			TerritoryRate = 18,        -- territory entry triggers fast
 			CorneredRate = 12,
-			PackGain = 50,             -- pack signal rapidly pulls them back in
-			DecayRate = 3.0,           -- moderate decay
-			TerritoryDecayMult = 2.5,  -- calms down faster outside territory
+			PackGain = 60,             -- pack signal = instant commit
+			DecayRate = 3.0,
+			TerritoryDecayMult = 2.5,
 			OutOfSightDecay = 4,
 			DecayDelay = 5,
 			AccelDecayMult = 2.0,
-			ChaseThreshold = 25,       -- easy to trigger chase
-			PursuitThreshold = 50,     -- committed at mid-aggro
-			BerserkThreshold = 80,     -- ignores leash at high rage
+			ChaseThreshold = 20,       -- very easy to trigger chase
+			PursuitThreshold = 45,
+			BerserkThreshold = 75,
 			FleeInversion = false,
 			FleeThreshold = 0,
 		},
@@ -611,26 +610,25 @@ local BrainrotConfig = {
 				WindupTime = 0.12,     -- fast snap bite
 				DamageMult = 1.0,
 				Cooldown = 1.0,
-				Range = 7,             -- bite range (accounts for hitbox)
+				Range = 7,
 			},
 			Lunge = {
 				WindupTime = 0.35,     -- short crouch before pounce
-				DamageMult = 1.8,      -- strong pounce hit
-				Range = 20,            -- gap-closer (triggers from 6-20 studs)
-				LeapHeight = 18,       -- visible jump arc
-				LeapSpeed = 75,        -- fast forward burst
-				HitRadius = 6,         -- must land close to target
+				DamageMult = 1.8,
+				Range = 20,
+				LeapHeight = 18,
+				LeapSpeed = 75,
+				HitRadius = 6,
 				Cooldown = 4.0,
 			},
 		},
 
-		-- Pack behavior: surround + chase signals, no flee sharing (flee is individual)
+		-- Pack behavior: chase signal rallies all wolves, no flee sharing
 		PackBehavior = {
 			Enabled = true,
 			SignalRange = 0.80,
-			ShareStates = { "Surround", "Chase" },
-			PackJoinChance = 0.85,     -- high chance to join when ally spots target
-			ProtectBaby = true,        -- pack rages when baby is hit
+			ShareStates = { "Chase" },
+			ProtectBaby = true,
 		},
 
 		-- Named variants
@@ -641,12 +639,12 @@ local BrainrotConfig = {
 				Weight = 20,
 				SizeMultiplier = 0.5,
 				SizeTier = "baby",
-				VariantPrice = 3000,           -- 60% of base value
+				VariantPrice = 3000,
 				StatOverrides = {
-					Health = 0.5,              -- 150 HP (before size scaling)
+					Health = 0.5,              -- 150 HP
 					AttackDamage = 0.5,        -- 4 damage per bite
-					Walkspeed = 1.23,          -- 16 walk (+3)
-					Runspeed = 1.14,           -- 24 run (+3)
+					Walkspeed = 1.14,          -- 16 walk
+					Runspeed = 1.09,           -- 24 run
 				},
 				VariantPersonalityOverrides = {
 					RunChance = 0.80,          -- extra skittish
@@ -658,7 +656,6 @@ local BrainrotConfig = {
 			{
 				Name = "Normal",
 				Weight = 55,
-				-- No overrides: uses base config as-is
 			},
 			{
 				Name = "Big",
@@ -666,20 +663,20 @@ local BrainrotConfig = {
 				Weight = 20,
 				SizeMultiplier = 1.2,
 				SizeTier = "big",
-				VariantPrice = 6250,           -- +25% value
+				VariantPrice = 6250,
 				StatOverrides = {
 					AttackDamage = 1.2,        -- ~10 damage per bite
-					Walkspeed = 1.077,         -- 14 walk (+1)
-					Runspeed = 1.048,          -- 22 run (+1)
+					Walkspeed = 1.07,          -- 15 walk
+					Runspeed = 1.045,          -- 23 run
 				},
 				VariantPersonalityOverrides = {
-					RunChance = 0.40,          -- braver
+					RunChance = 0.40,
 					RunWhenAttacked = 0.45,
 					RetaliateAggression = 0.70,
 					PursuitTenacity = 0.85,
 					HeavyAttackBias = 0.40,    -- lunges more often
-					SafeZonePull = 0.40,       -- wanders more than normal wolves
-					PatrolRadius = 28,         -- larger patrol area
+					SafeZonePull = 0.40,
+					PatrolRadius = 28,
 				},
 			},
 			{
@@ -690,32 +687,32 @@ local BrainrotConfig = {
 				SizeTier = "huge",
 				VariantPrice = 12000,
 				StatOverrides = {
-					Health = 1.5,              -- 450 HP (before size scaling)
+					Health = 1.5,              -- 450 HP
 					AttackDamage = 2.0,        -- 16 damage per bite
-					Walkspeed = 1.385,         -- 18 walk (+5)
-					Runspeed = 1.238,          -- 26 run (+5)
+					Walkspeed = 1.36,          -- 19 walk
+					Runspeed = 1.23,           -- 27 run
 				},
-				-- Huge wolf: lunge-only (no basic bite — all pounces)
+				-- Huge wolf: lunge-only
 				VariantMoveOverrides = {
 					Lunge = {
-						WindupTime = 0.45,     -- slightly longer coil
-						DamageMult = 2.2,      -- devastating pounce
-						LeapHeight = 22,       -- massive arc
-						LeapSpeed = 85,        -- very fast forward burst
+						WindupTime = 0.45,
+						DamageMult = 2.2,
+						LeapHeight = 22,
+						LeapSpeed = 85,
 						HitRadius = 8,
-						Cooldown = 3.0,        -- slightly faster cycle
-						Range = 25,            -- longer lunge range
+						Cooldown = 3.0,
+						Range = 25,
 					},
 				},
 				VariantPersonalityOverrides = {
-					RunChance = 0.15,          -- barely flees
+					RunChance = 0.15,
 					RunWhenAttacked = 0.20,
 					RetaliateAggression = 0.90,
 					PursuitTenacity = 0.95,
 					CorneredAggression = 1.0,
 					HeavyAttackBias = 1.0,     -- lunge-only
-					SafeZonePull = 0.25,       -- roams most freely
-					PatrolRadius = 35,         -- large patrol area
+					SafeZonePull = 0.25,
+					PatrolRadius = 35,
 				},
 			},
 		},
