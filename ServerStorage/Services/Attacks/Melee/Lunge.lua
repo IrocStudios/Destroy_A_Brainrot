@@ -51,10 +51,17 @@ function Lunge:Execute(entry: any, target: any, services: any, moveConfig: any)
 	local targetHum = targetChar:FindFirstChildOfClass("Humanoid")
 	if not targetHum or targetHum.Health <= 0 then return end
 
-	-- Calculate leap trajectory: forward-biased, low arc
+	-- Calculate leap trajectory with lead prediction
+	-- Aim where the target WILL be, not where they are now
 	local toTarget = targetHRP.Position - hrp.Position
 	local flatDist = Vector3.new(toTarget.X, 0, toTarget.Z).Magnitude
-	local direction = toTarget.Unit
+	local travelEst = math.clamp(flatDist / leapSpeed, 0.15, 0.6)
+
+	-- Predict target movement during travel time
+	local targetVel = targetHRP.AssemblyLinearVelocity
+	local predictedPos = targetHRP.Position + targetVel * travelEst * 0.7 -- 70% lead (don't overshoot)
+	local toPredicted = predictedPos - hrp.Position
+	local direction = toPredicted.Unit
 	local launchVelocity = Vector3.new(direction.X * leapSpeed, leapHeight, direction.Z * leapSpeed)
 
 	-- Fire FX remote for the leap visual

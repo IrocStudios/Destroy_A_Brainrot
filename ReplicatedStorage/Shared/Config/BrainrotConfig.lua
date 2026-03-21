@@ -278,7 +278,7 @@ local BrainrotConfig = {
 		Attackspeed = 22,
 		HealRate = 0,
 
-		AttackDamage = 12,
+		AttackDamage = 10,         -- 15% reduction from 12, rounded
 		AttackRange = 6,
 		AttackCooldown = 1.4,
 
@@ -539,18 +539,18 @@ local BrainrotConfig = {
 	["Pipi_Kiwi"] = {
 		DisplayName = "Pipi Kiwi",
 
-		Health = 300,
+		Health = 400,
 		Walkspeed = 14,           -- idle patrol speed (+1)
 		Runspeed = 22,            -- chase/attack commit speed (+1)
 
 		Attackspeed = 22,
 		HealRate = 0,
 
-		AttackDamage = 8,         -- low per-hit (pack compensates)
+		AttackDamage = 12,        -- +20% +2 across the board
 		AttackRange = 7,          -- bite range (accounts for hitbox)
 		AttackCooldown = 1.0,     -- fast repeated bites
 
-		Price = 5000,
+		Price = 12000,
 
 		RarityName = "Common",
 		Personality = "Territorial",
@@ -639,9 +639,9 @@ local BrainrotConfig = {
 				Weight = 20,
 				SizeMultiplier = 0.5,
 				SizeTier = "baby",
-				VariantPrice = 3000,
+				VariantPrice = 7200,
 				StatOverrides = {
-					Health = 0.5,              -- 150 HP
+					Health = 0.75,             -- 400 × 0.75 × 0.5 = 150 HP
 					AttackDamage = 0.5,        -- 4 damage per bite
 					Walkspeed = 1.14,          -- 16 walk
 					Runspeed = 1.09,           -- 24 run
@@ -663,7 +663,7 @@ local BrainrotConfig = {
 				Weight = 20,
 				SizeMultiplier = 1.2,
 				SizeTier = "big",
-				VariantPrice = 6250,
+				VariantPrice = 15000,
 				StatOverrides = {
 					AttackDamage = 1.2,        -- ~10 damage per bite
 					Walkspeed = 1.07,          -- 15 walk
@@ -685,9 +685,9 @@ local BrainrotConfig = {
 				Weight = 5,
 				SizeMultiplier = 2.0,
 				SizeTier = "huge",
-				VariantPrice = 12000,
+				VariantPrice = 28000,
 				StatOverrides = {
-					Health = 1.5,              -- 450 HP
+					Health = 1.375,            -- 400 × 1.375 × 2.0 = 1100 HP
 					AttackDamage = 2.0,        -- 16 damage per bite
 					Walkspeed = 1.36,          -- 19 walk
 					Runspeed = 1.23,           -- 27 run
@@ -731,67 +731,72 @@ local BrainrotConfig = {
 	["Boneca_Ambalabu"] = {
 		DisplayName = "Boneca Ambalabu",
 
-		Health = 200,
-		Walkspeed = 18,           -- fast idle rolling
-		Runspeed = 32,            -- very fast chase AND flee
+		Health = 450,
+		Walkspeed = 21,           -- idle rolling (+2)
+		Runspeed = 34,            -- charge speed (+3)
 
-		Attackspeed = 32,
+		Attackspeed = 29,
 		HealRate = 0,
 
-		AttackDamage = 7,         -- just below Pipi_Kiwi's 8
-		AttackRange = 6,
-		AttackCooldown = 0.9,     -- quick snap
+		AttackDamage = 10,        -- base damage (2.5x via DamageMult = 25 effective)
+		AttackRange = 4,          -- must physically ram into you
+		AttackCooldown = 1.0,     -- once per pass
 
-		Price = 3500,             -- below Pipi_Kiwi ($5000), above Burbaloni ($2750)
-		RarityName = "Rare",
+		Price = 10000,
+		RarityName = "Common",
 
 		Personality = "Skittish",
 
 		AttackMoves = { "BasicMelee" },
-		LocomotionType = "Walk",
+		LocomotionType = "Roll",
+
+		-- RollLocomotion config: constant driving, rare idle
+		RollConfig = {
+			IdleChance = 0.25,        -- 25% chance to idle between drives
+		},
 
 		PersonalityOverrides = {
-			IdleFrequency = { 0.8, 2.0 },     -- short idle pauses (always rolling)
-			IdleActions = { "walk", "walk", "walk", "fidget" },
+			IdleFrequency = { 3.0, 6.0 },     -- long pause between rolls (3-6 seconds)
+			IdleActions = { "walk", "walk", "walk", "idle" },
 
-			AggroDistance = 60,
-			ChaseRange = 100,
-			AttackChance = 0.55,               -- bold — goes in unprovoked
+			AggroDistance = 60,                -- decent detection range
+			ChaseRange = 100,                  -- committed pursuit
+			AttackChance = 0.80,               -- aggressive — charges on sight
 
-			RunChance = 0.95,                  -- almost always flees on damage
+			RunChance = 0.95,                  -- almost always flees AFTER attack
 			RunWhenAttacked = 0.95,            -- first hit = gone
 			RetaliateOnDamage = false,         -- never fights back
 			RetaliateAggression = 0.0,
 
-			FearTime = 3.5,                    -- runs for a good while
-			FearDistance = 40,
-			RunMaxDistance = 140,
+			FearTime = 4.0,                    -- commits to running
+			FearDistance = 80,                 -- runs FAR before stopping
+			RunMaxDistance = 160,
 
 			FleeStyle = "zigzag",              -- hard to chase down
-			PursuitTenacity = 0.50,
+			PursuitTenacity = 0.60,            -- committed to the charge
 			CorneredAggression = 0.30,         -- even cornered, prefers to flee
-			TerritoryTenacity = 0.20,          -- not territorial at all
+			TerritoryTenacity = 0.20,
 			TerritoryLeashPct = 0.40,
 			LeashStrength = 0.30,
 
 			SafeZonePull = 0.10,               -- barely uses den — always roaming
-			PatrolRadius = 40,                 -- huge wander area
+			PatrolRadius = 35,                 -- big wander area
 		},
 
 		AggroCurveOverrides = {
-			IdleAggro = 8,                     -- alert, looking for action
-			DamageGain = 3,                    -- damage scares, doesn't enrage
-			ProximityRate = 25,                -- builds fast from seeing players
-			TerritoryRate = 5,                 -- not territorial
+			IdleAggro = 5,                     -- calm at rest, builds fast via ProximityRate
+			DamageGain = 3,
+			ProximityRate = 60,                -- 5→15 in ~0.17s — locks on fast when player nearby
+			TerritoryRate = 10,
 			CorneredRate = 4,
-			DecayRate = 8.0,                   -- aggro drops very fast
+			DecayRate = 10.0,                  -- drops fast when player leaves
 			TerritoryDecayMult = 1.5,
-			OutOfSightDecay = 10,              -- forgets quickly
-			DecayDelay = 2,                    -- starts forgetting fast
+			OutOfSightDecay = 15,              -- forgets quickly out of sight
+			DecayDelay = 2,
 			AccelDecayMult = 2.5,
-			ChaseThreshold = 18,               -- very easy to trigger
-			PursuitThreshold = 40,
-			BerserkThreshold = 95,             -- basically never berserks
+			ChaseThreshold = 15,               -- needs proximity to trigger (not instant)
+			PursuitThreshold = 30,
+			BerserkThreshold = 95,
 			FleeInversion = false,
 			FleeThreshold = 0,
 		},
@@ -799,10 +804,82 @@ local BrainrotConfig = {
 		MoveOverrides = {
 			BasicMelee = {
 				WindupTime = 0.06,             -- near-instant snap
-				DamageMult = 1.0,
-				Cooldown = 0.9,
-				Range = 6,
+				DamageMult = 2.5,              -- heavy ram hit (10 × 2.5 = 25)
+				Cooldown = 1.0,
+				Range = 4,                     -- must physically touch
 				NoStop = true,                 -- drive-by: no pause, keep rolling
+				FleeAfterAttack = true,        -- hit and run: always flee after landing
+			},
+		},
+
+		Variants = {
+			{
+				Name = "Normal",
+				Weight = 45,
+				-- Base frog: 120 HP, 19/31 speed, 25 effective dmg, $2000
+			},
+			{
+				Name = "Tadpole",
+				NameTag = "(Tadpole)",
+				Weight = 30,
+				SizeMultiplier = 0.6,
+				SizeTier = "baby",
+				VariantPrice = 6000,               -- 60% of $10000
+				StatOverrides = {
+					Health = 1.296,                -- 450 × 1.296 × 0.6 ≈ 350 HP
+					AttackDamage = 0.6,            -- 10 × 0.6 = 6 base (× 2.5 = 15 eff)
+					Walkspeed = 1.43,              -- 21 × 1.43 ≈ 30 walk (zippy)
+					Runspeed = 1.44,               -- 34 × 1.44 ≈ 49 run (fast)
+					Attackspeed = 1.5,             -- 29 × 1.5 ≈ 43
+				},
+				VariantPersonalityOverrides = {
+					RunChance = 1.0,               -- ALWAYS flees on damage
+					RunWhenAttacked = 1.0,         -- first hit = gone, every time
+					FearTime = 5.0,                -- runs for a long time
+					FearDistance = 60,             -- runs far
+					AttackChance = 0.40,           -- timid
+					PursuitTenacity = 0.20,        -- gives up chase easily
+				},
+			},
+			{
+				Name = "Toad",
+				NameTag = "(Toad)",
+				Weight = 15,
+				SizeMultiplier = 1.25,
+				SizeTier = "big",
+				VariantPrice = 12500,              -- 125% of $10000
+				StatOverrides = {
+					Health = 1.022,                -- 450 × 1.022 × 1.25 ≈ 575 HP
+					AttackDamage = 1.4,            -- 10 × 1.4 = 14 base (× 2.5 = 35 effective)
+					Walkspeed = 0.905,             -- 21 × 0.905 ≈ 19
+					Runspeed = 0.912,              -- 34 × 0.912 ≈ 31
+				},
+				VariantPersonalityOverrides = {
+					RunChance = 0.75,              -- flees less than normal
+					RunWhenAttacked = 0.75,
+					FearTime = 2.5,                -- shorter flee
+				},
+			},
+			{
+				Name = "Bullfrog",
+				NameTag = "(Bullfrog)",
+				Weight = 10,
+				SizeMultiplier = 1.75,
+				SizeTier = "huge",
+				VariantPrice = 20000,              -- 2x of $10000
+				StatOverrides = {
+					Health = 0.889,                -- 450 × 0.889 × 1.75 ≈ 700 HP
+					AttackDamage = 1.2,            -- 10 × 1.2 = 12 base (× 2.5 = 30 effective)
+					Walkspeed = 1.143,             -- 21 × 1.143 ≈ 24 (+3)
+					Runspeed = 1.088,              -- 34 × 1.088 ≈ 37 (+3)
+				},
+				VariantPersonalityOverrides = {
+					AttackChance = 0.95,           -- ultra aggressive
+					PursuitTenacity = 0.85,        -- very committed
+					RunChance = 0.40,              -- rarely flees on damage
+					RunWhenAttacked = 0.45,        -- tanky — stands its ground
+					FearTime = 1.5,                -- short flee when it does run
+				},
 			},
 		},
 	},

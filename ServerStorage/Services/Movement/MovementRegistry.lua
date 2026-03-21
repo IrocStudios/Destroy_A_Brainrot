@@ -10,8 +10,9 @@ local MovementRegistry = {}
 local _modules: { [string]: any } = {}
 local _loaded = false
 
+local DEBUG = false
 local function dprint(...)
-	print("[MovementRegistry]", ...)
+	if DEBUG then print("[MovementRegistry]", ...) end
 end
 
 function MovementRegistry:Init()

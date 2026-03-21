@@ -648,6 +648,9 @@ function AIService:Register(brainrotId: string, model: Model)
 		LeashRadius = leashRadius,
 		FleeUntil = 0,
 		FleeFrom = nil,
+		FleeZigDir = 1,
+		FleeNextZig = 0,
+		_fleeCommitted = false,
 
 		WanderTarget = nil,
 		ReturnTarget = nil,
@@ -690,8 +693,7 @@ function AIService:Register(brainrotId: string, model: Model)
 	-- Init attack state
 	AttackRegistry:InitEntry(entry)
 
-	-- Resolve aggro curve
-	local variantName = model:GetAttribute("VariantName")
+	-- Resolve aggro curve (reuse variantName from line 576)
 	entry.AC = resolveAggroCurve(P, brainrotName, variantName)
 	entry.Aggro = entry.AC.IdleAggro or 0
 
@@ -979,17 +981,30 @@ function AIService:_signalPack(entry: AIEntry, newState: string, target: Player?
 		if dist > radius then continue end
 
 		if newState == "Chase" and target then
-			-- Already chasing this target? Skip
-			if other.State == "Chase" and other.Target == target then continue end
-			-- Already attacking? Don't interrupt
-			if other.State == "Attack" then continue end
+			-- Already chasing? Just boost aggro, don't interrupt movement
+			if other.State == "Chase" or other.State == "Attack" then
+				local otherAC = other.AC
+				local packGain = otherAC and otherAC.PackGain or 30
+				other.Aggro = math.clamp((other.Aggro or 0) + packGain, 0, 100)
+				continue
+			end
 
-			-- Boost aggro and force chase — simple, no probability
+			-- Smaller wolf can't rally a bigger wolf — only boost aggro
+			local otherSizeMult = other.SizeMultiplier or 1
+			local senderSizeMult = entry.SizeMultiplier or 1
+			if senderSizeMult < otherSizeMult then
+				local otherAC = other.AC
+				local packGain = otherAC and otherAC.PackGain or 30
+				other.Aggro = math.clamp((other.Aggro or 0) + packGain * 0.5, 0, 100)
+				continue
+			end
+
+			-- Idle/Wander wolf gets rallied into chase
 			local otherAC = other.AC
 			local packGain = otherAC and otherAC.PackGain or 30
 			other.Aggro = math.clamp((other.Aggro or 0) + packGain, 0, 100)
 			other.Target = target
-			other.HuntAngle = math.random() * math.pi * 2 -- random approach side
+			other.HuntAngle = math.random() * math.pi * 2
 			self:_setState(other, "Chase")
 
 		elseif newState == "Flee" then
@@ -1488,7 +1503,29 @@ function AIService:_stepOne(entry: AIEntry)
 		safeSetAnim(entry, "Run")
 
 		if t >= entry.FleeUntil then
-			self:_setState(entry, "Return")
+			-- Committed flee (FleeAfterAttack): always return, never re-chase
+			if entry._fleeCommitted then
+				entry._fleeCommitted = nil
+				entry.Target = nil
+				self:_setState(entry, "Return")
+			elseif entry.Target then
+				-- Normal flee (from damage): may re-chase if still angry
+				local chaseThreshold = entry.AC and entry.AC.ChaseThreshold or 35
+				if entry.Aggro >= chaseThreshold then
+					local thrpCheck = getCharHRP(entry.Target)
+					local thumCheck = entry.Target.Character and entry.Target.Character:FindFirstChildOfClass("Humanoid")
+					if thrpCheck and thumCheck and thumCheck.Health > 0 then
+						self:_setState(entry, "Chase")
+					else
+						entry.Target = nil
+						self:_setState(entry, "Return")
+					end
+				else
+					self:_setState(entry, "Return")
+				end
+			else
+				self:_setState(entry, "Return")
+			end
 		end
 		return
 	end
@@ -1587,17 +1624,6 @@ function AIService:_stepOne(entry: AIEntry)
 					entry.ReturnTarget = Vector3.new(entry.SpawnPos.X, y, entry.SpawnPos.Z)
 				end
 			end
-		end
-
-		if not entry.ReturnTarget then
-			-- No return target computed (edge case) — fall back to spawn
-			local y = territoryY(entry.Territory, pos.Y)
-			entry.ReturnTarget = Vector3.new(entry.SpawnPos.X, y, entry.SpawnPos.Z)
-		end
-
-		if not entry.ReturnTarget then
-			self:_setState(entry, "Idle")
-			return
 		end
 
 		local returnPos = entry.ReturnTarget
@@ -1801,14 +1827,34 @@ function AIService:_stepOne(entry: AIEntry)
 				-- Record usage for per-move cooldown
 				AttackRegistry:RecordUse(entry, moveName :: string)
 
-				-- Execute the attack (may yield for windup)
-				task.spawn(function()
-					moveMod:Execute(entry, target, self.Services, moveCfg)
-				end)
+				-- Execute the attack
+				-- NoStop (drive-by): execute synchronously so damage lands on the
+				-- same tick the range check passes (frog moves fast, can't defer)
+				-- Normal attacks: task.spawn since they may yield for windup
+				if noStop then
+					pcall(moveMod.Execute, moveMod, entry, target, self.Services, moveCfg)
+				else
+					task.spawn(function()
+						moveMod:Execute(entry, target, self.Services, moveCfg)
+					end)
+				end
 
 				-- Pack wolves: re-roll hunt angle so next approach comes from a different side
 				if entry.HuntAngle then
 					entry.HuntAngle = math.random() * math.pi * 2
+				end
+
+				-- FleeAfterAttack: hit-and-run — commit to flee, no waffling
+				if moveCfg.FleeAfterAttack then
+					entry.FleeFrom = target
+					entry.Target = nil                 -- always clear target
+					local fearTime = pNumber(entry.P, "FearTime", 2.5)
+					entry.FleeUntil = now() + fearTime
+					entry._fleeCommitted = true        -- flag: don't re-chase when flee ends
+					-- Drop aggro below chase threshold so it doesn't re-acquire immediately
+					local chaseThreshold = entry.AC and entry.AC.ChaseThreshold or 35
+					entry.Aggro = math.min(entry.Aggro, chaseThreshold * 0.5)
+					self:_setState(entry, "Flee")
 				end
 			elseif not noStop and t >= entry.NextAttackAt then
 				-- No valid move, fallback to basic damage (only for stop-attacks)
@@ -1887,7 +1933,11 @@ function AIService:_stepOne(entry: AIEntry)
 			end
 
 			if pick == "walk" then
-				entry.WanderTarget = self:_pickWanderPoint(entry)
+				local wp = self:_pickWanderPoint(entry)
+				if entry.Locomotion and type(entry.Locomotion.AdjustWanderPoint) == "function" then
+					wp = entry.Locomotion:AdjustWanderPoint(entry, wp)
+				end
+				entry.WanderTarget = wp
 				self:_setState(entry, "Wander")
 			elseif pick == "fidget" then
 				-- Short micro-movement: 3-6 studs at half walk speed
@@ -1921,6 +1971,21 @@ function AIService:_stepOne(entry: AIEntry)
 		local arrivalDist = if isFidget then 2 else 3
 		if dXZ <= arrivalDist then
 			entry._isFidget = nil
+
+			-- Locomotion modules can chain wander (e.g. RollLocomotion keeps driving)
+			if not isFidget and entry.Locomotion
+				and type(entry.Locomotion.ShouldChainWander) == "function"
+				and entry.Locomotion:ShouldChainWander(entry)
+			then
+				local candidate = self:_pickWanderPoint(entry)
+				-- Locomotion can adjust the point to avoid walls
+				if type(entry.Locomotion.AdjustWanderPoint) == "function" then
+					candidate = entry.Locomotion:AdjustWanderPoint(entry, candidate)
+				end
+				entry.WanderTarget = candidate
+				return -- stay in Wander, no pause
+			end
+
 			local lo, hi = pRange(entry.P, "WanderPause", self.Config.DefaultWanderPauseMin, self.Config.DefaultWanderPauseMax)
 			-- Fidgets have shorter pause after (quick settle)
 			if isFidget then
@@ -1943,6 +2008,13 @@ local MOVE_VELOCITY_THRESHOLD = 1.0 -- studs/sec; below this = "not moving"
 
 function AIService:_velocityAnimCheck(entry: AIEntry)
 	if entry.State == "Dead" then return end
+
+	-- Locomotion modules can opt out of forced idle (e.g. RollLocomotion)
+	local loco = entry.Locomotion
+	if loco and type(loco.IsImmuneToForcedIdle) == "function" and loco:IsImmuneToForcedIdle() then
+		return
+	end
+
 	local hrp = entry.HRP
 	if not hrp then return end
 
@@ -1964,7 +2036,23 @@ function AIService:_velocityAnimCheck(entry: AIEntry)
 	local xzSpeed = math.sqrt(vel.X * vel.X + vel.Z * vel.Z)
 
 	if xzSpeed < MOVE_VELOCITY_THRESHOLD then
+		-- Locomotion modules can request a delay before forcing idle
+		-- (prevents flicker during direction changes, catches real stops)
+		local delay = 0
+		if loco and type(loco.GetForcedIdleDelay) == "function" then
+			delay = loco:GetForcedIdleDelay()
+		end
+
+		if delay > 0 then
+			entry._forcedIdleTicks = (entry._forcedIdleTicks or 0) + 1
+			if entry._forcedIdleTicks < delay then
+				return -- not stuck long enough yet
+			end
+		end
+
 		safeSetAnim(entry, "Idle")
+	else
+		entry._forcedIdleTicks = 0
 	end
 end
 
@@ -2025,6 +2113,22 @@ function AIService:_stuckHopCheck(entry: AIEntry)
 	-- Stuck: increment counter
 	entry.StuckTicks = (entry.StuckTicks or 0) + 1
 
+	-- Locomotion override: some modules handle stuck themselves (e.g. RollLocomotion reverses)
+	local loco = entry.Locomotion
+	if loco and type(loco.OnStuck) == "function" then
+		if entry.StuckTicks >= 4 then -- ~0.4s stuck
+			if loco:OnStuck(entry) then
+				entry.StuckTicks = 0
+				entry.StuckHopStage = 0
+				entry.LastHopAt = now()
+				return -- locomotion handled it, skip hop logic
+			end
+			-- OnStuck failed — fall through to normal hop system as fallback
+		else
+			return -- not stuck long enough for OnStuck yet, skip hop too
+		end
+	end
+
 	-- Cooldown check
 	if now() - (entry.LastHopAt or 0) < HOP_COOLDOWN then
 		return
@@ -2040,7 +2144,11 @@ function AIService:_stuckHopCheck(entry: AIEntry)
 
 		-- Force a new path by clearing current target and re-entering state
 		if entry.State == "Wander" then
-			entry.WanderTarget = self:_pickWanderPoint(entry)
+			local wp = self:_pickWanderPoint(entry)
+			if entry.Locomotion and type(entry.Locomotion.AdjustWanderPoint) == "function" then
+				wp = entry.Locomotion:AdjustWanderPoint(entry, wp)
+			end
+			entry.WanderTarget = wp
 			if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
 				entry.Locomotion:Stop(entry)
 			end

@@ -5,11 +5,6 @@
 
 local PathfindingService = game:GetService("PathfindingService")
 local Workspace = game:GetService("Workspace")
-local ServerStorage = game:GetService("ServerStorage")
-
-local ExclusionZoneManager = require(
-	ServerStorage:WaitForChild("Services"):WaitForChild("Movement"):WaitForChild("ExclusionZoneManager")
-)
 
 local WalkLocomotion = {}
 WalkLocomotion.Name = "Walk"
