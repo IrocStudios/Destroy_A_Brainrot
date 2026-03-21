@@ -10,6 +10,8 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
@@ -27,6 +29,7 @@ local AttackRegistry = require(
 type Services = { [string]: any }
 
 type AIStateName = "Idle" | "Wander" | "Chase" | "Attack" | "Flee" | "Return" | "Dead" | "WaitAtEdge"
+	| "SeekHide" | "HideTree" | "HideUnderground" | "Grab"
 
 type AIEntry = {
 	Id: string,
@@ -96,6 +99,17 @@ type AIEntry = {
 	Aggro: number,
 	AggroLockedUntil: number,  -- timestamp: aggro cannot decay below 100 until this time
 	AC: { [string]: any },     -- resolved aggro curve parameters
+
+	-- Ambush behavior (Orangutini Ananassini)
+	IsAmbush: boolean?,           -- flag: uses ambush state machine
+	HideSpot: BasePart?,          -- current tree or nil (underground = at current pos)
+	HideType: string?,            -- "tree" | "underground" | nil
+	HideUntil: number?,           -- patience timer expiry
+	HideTween: Tween?,            -- active tween (cancelable)
+	HideTweenDone: boolean?,      -- true when tween completed
+	HideTreeSide: string?,        -- "north"|"south"|"east"|"west" — claimed side of tree
+	GrabTarget: Player?,          -- player currently grabbed
+	OriginalCFrame: CFrame?,      -- saved CFrame before hiding (for restore)
 
 	Conn: { RBXScriptConnection },
 }
@@ -306,6 +320,88 @@ end
 
 -- Pack hunt offset (studs from target) for pack wolves approaching from random sides
 local HUNT_OFFSET = 4
+
+-- Ambush tween helper: starts a cancelable CFrame tween on the HRP.
+-- Stores the tween on entry.HideTween so it can be cancelled by _onDamaged.
+-- entry.HideTweenDone is set to true when complete.
+local TWEEN_CLIMB_TIME = 2.5   -- seconds to climb up tree (slower, stealthy)
+local TWEEN_DIG_TIME = 0.8     -- seconds to sink underground
+local TWEEN_POP_TIME = 0.3     -- seconds to pop out of ground
+local AMBUSH_MAX_PER_TREE = 4  -- max monkeys on one tree (one per side)
+local AMBUSH_DIG_WEIGHT = 4    -- dig:tree ratio (4:1 favors underground)
+
+-- Track which tree sides are occupied: _treeSideOccupants[treePart] = { [side] = entryId }
+local _treeSideOccupants: { [BasePart]: { [string]: string } } = {}
+local TREE_SIDES = { "north", "south", "east", "west" }
+
+local function getTreeSideOffset(treePart: BasePart, side: string): Vector3
+	local halfX = treePart.Size.X * 0.5
+	local halfZ = treePart.Size.Z * 0.5
+	if side == "north" then return Vector3.new(0, 0, -halfZ)
+	elseif side == "south" then return Vector3.new(0, 0, halfZ)
+	elseif side == "east" then return Vector3.new(halfX, 0, 0)
+	else return Vector3.new(-halfX, 0, 0) end
+end
+
+local function claimTreeSide(treePart: BasePart, entryId: string): string?
+	if not _treeSideOccupants[treePart] then
+		_treeSideOccupants[treePart] = {}
+	end
+	local sides = _treeSideOccupants[treePart]
+	-- Pick a random available side
+	local available = {}
+	for _, s in ipairs(TREE_SIDES) do
+		if not sides[s] then table.insert(available, s) end
+	end
+	if #available == 0 then return nil end -- tree full
+	local pick = available[math.random(1, #available)]
+	sides[pick] = entryId
+	return pick
+end
+
+local function releaseTreeSide(treePart: BasePart?, entryId: string)
+	if not treePart or not _treeSideOccupants[treePart] then return end
+	local sides = _treeSideOccupants[treePart]
+	for side, id in pairs(sides) do
+		if id == entryId then
+			sides[side] = nil
+			break
+		end
+	end
+end
+
+local function startAmbushTween(entry: any, targetCFrame: CFrame, duration: number)
+	-- Cancel any existing tween
+	if entry.HideTween then
+		pcall(function() entry.HideTween:Cancel() end)
+		entry.HideTween = nil
+	end
+	entry.HideTweenDone = false
+
+	local hrp = entry.HRP
+	if not hrp or not hrp.Parent then return end
+
+	local info = TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
+	local tween = TweenService:Create(hrp, info, { CFrame = targetCFrame })
+
+	tween.Completed:Connect(function(status)
+		if status == Enum.PlaybackState.Completed then
+			entry.HideTweenDone = true
+		end
+		entry.HideTween = nil
+	end)
+
+	entry.HideTween = tween
+	tween:Play()
+end
+
+local function cancelAmbushTween(entry: any)
+	if entry.HideTween then
+		pcall(function() entry.HideTween:Cancel() end)
+		entry.HideTween = nil
+	end
+	entry.HideTweenDone = false
+end
 
 --//////////////////////////////
 -- Resolve brainrot attack moves + locomotion type
@@ -703,6 +799,11 @@ function AIService:Register(brainrotId: string, model: Model)
 		entry.HuntAngle = math.random() * math.pi * 2
 	end
 
+	-- Ambush brainrots: flag for ambush state machine
+	if P.AmbushBehavior then
+		entry.IsAmbush = true
+	end
+
 	-- Damage reaction via health drops
 	table.insert(entry.Conn, hum.HealthChanged:Connect(function(h: number)
 		local prev = entry.LastHealth
@@ -724,7 +825,11 @@ function AIService:Register(brainrotId: string, model: Model)
 	end))
 
 	self._active[brainrotId] = entry
-	self:_setState(entry, "Idle")
+	if entry.IsAmbush then
+		self:_setState(entry, "SeekHide")
+	else
+		self:_setState(entry, "Idle")
+	end
 end
 
 function AIService:Unregister(brainrotId: string)
@@ -769,10 +874,12 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		entry.Target = nil
 		safeSetAnim(entry, "Walk")
 	elseif state == "Chase" then
+		if entry.IsAmbush then entry.Model:SetAttribute("HideBillboard", false) end
 		safeSetAnim(entry, "Run")
 	elseif state == "Attack" then
 		safeSetAnim(entry, "Attack")
 	elseif state == "Flee" then
+		if entry.IsAmbush then entry.Model:SetAttribute("HideBillboard", false) end
 		safeSetAnim(entry, "Run")
 	elseif state == "Return" then
 		entry.Target = nil
@@ -784,6 +891,34 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		entry.Humanoid.WalkSpeed = 0
 		entry.Humanoid:Move(Vector3.zero, false)
 		safeSetAnim(entry, "Idle")
+	elseif state == "SeekHide" then
+		entry.Target = nil
+		entry.HideSpot = nil
+		entry.HideType = nil
+		entry._popping = nil
+		entry._popNextState = nil
+		entry.Model:SetAttribute("HideBillboard", false)
+		safeSetAnim(entry, "Run")
+	elseif state == "HideTree" then
+		entry.Humanoid.WalkSpeed = 0
+		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+			entry.Locomotion:Stop(entry)
+		end
+		entry.Model:SetAttribute("HideBillboard", true)
+		safeSetAnim(entry, "Idle")
+	elseif state == "HideUnderground" then
+		entry.Humanoid.WalkSpeed = 0
+		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+			entry.Locomotion:Stop(entry)
+		end
+		entry.Model:SetAttribute("HideBillboard", true)
+		safeSetAnim(entry, "Idle")
+	elseif state == "Grab" then
+		entry.Humanoid.WalkSpeed = 0
+		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
+			entry.Locomotion:Stop(entry)
+		end
+		safeSetAnim(entry, "Attack")
 	elseif state == "Dead" then
 		entry.Target = nil
 		entry.WanderTarget = nil
@@ -797,6 +932,61 @@ end
 
 function AIService:_onDamaged(entry: AIEntry)
 	if entry.State == "Dead" then return end
+
+	-- Ambush brainrots: flee from hiding when shot
+	if entry.IsAmbush and (entry.State == "HideTree" or entry.State == "HideUnderground") then
+		cancelAmbushTween(entry)
+
+		if entry.State == "HideUnderground" then
+			-- Shot underground: start pop tween (stay anchored), flee after pop
+			if entry.OriginalCFrame and entry.HRP and entry.HRP.Parent then
+				startAmbushTween(entry, entry.OriginalCFrame, TWEEN_POP_TIME)
+				entry._popping = true
+				-- Set flee info so evaluator picks it up after pop
+				local plr = select(1, pickNearestPlayer(entry.OriginalCFrame.Position, 200))
+				entry.FleeFrom = plr
+				entry.FleeUntil = now() + TWEEN_POP_TIME + pNumber(entry.P, "FearTime", 3.0)
+				entry._fleeCommitted = true
+				entry._popNextState = "Flee"
+			end
+			entry.HideSpot = nil
+			entry.HideType = nil
+			-- Stay in HideUnderground — evaluator handles pop→unanchor→Flee
+			return
+		end
+
+		-- Shot in tree: unanchor for physics freefall (no teleport!)
+		if entry.State == "HideTree" then
+			releaseTreeSide(entry.HideSpot, entry.Id)
+			if entry.HRP then entry.HRP.Anchored = false end
+			entry.HideTreeSide = nil
+		end
+		entry.HideSpot = nil
+		entry.HideType = nil
+		-- Flee!
+		local plr = select(1, pickNearestPlayer(entry.HRP.Position, 200))
+		entry.FleeFrom = plr
+		entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 3.0)
+		entry._fleeCommitted = true
+		self:_setState(entry, "Flee")
+		return
+	end
+
+	-- Ambush brainrots in Grab: ignore damage, do NOT flee or change state
+	if entry.IsAmbush and entry.State == "Grab" then
+		return
+	end
+
+	-- Ambush brainrots exposed (Chase, SeekHide, etc.): very skittish, always flee on damage
+	if entry.IsAmbush and entry.State ~= "Flee" then
+		local plr = select(1, pickNearestPlayer(entry.HRP.Position, 200))
+		entry.FleeFrom = plr
+		entry.Target = nil
+		entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 3.0)
+		entry._fleeCommitted = true
+		self:_setState(entry, "Flee")
+		return
+	end
 
 	-- Baby protection: if this is a baby-tier brainrot, rally the whole pack
 	local sizeTier = entry.Model and entry.Model:GetAttribute("SizeTier")
@@ -1361,6 +1551,12 @@ function AIService:_stepOne(entry: AIEntry)
 	local attackDamage = getAttrNumber(entry.EnemyInfo, "AttackDamage", self.Config.DefaultAttackDamage)
 	local attackRange = getAttrNumber(entry.EnemyInfo, "AttackRange", self.Config.DefaultAttackRange)
 
+	-- Scale attack range by size — bigger brainrots reach farther, smaller ones reach less
+	local sizeMult = entry.SizeMultiplier or 1
+	if sizeMult ~= 1 then
+		attackRange = attackRange * sizeMult
+	end
+
 	local aggroDist = pNumber(entry.P, "AggroDistance", self.Config.DefaultDetection)
 	local chaseRange = pNumber(entry.P, "ChaseRange", self.Config.DefaultChaseRange)
 	local fearDist = pNumber(entry.P, "FearDistance", 40)
@@ -1380,15 +1576,20 @@ function AIService:_stepOne(entry: AIEntry)
 	end
 
 	-- Check if WE are in an exclusion zone (should leave ASAP)
+	-- Skip for ambush brainrots while hiding (they're stationary and hidden)
 	local selfInZone, selfZoneWeight = ExclusionZoneManager:Query(pos)
-	if selfInZone and selfZoneWeight >= 50 then
+	if selfInZone and selfZoneWeight >= 50
+		and entry.State ~= "HideTree" and entry.State ~= "HideUnderground" and entry.State ~= "Grab" then
 		-- Get out! Move toward spawn/territory
 		self:_setState(entry, "Return")
 	end
 
 	-- Return overrides neutral states (with cooldown to prevent ping-pong)
+	-- Ambush states (HideTree, HideUnderground, SeekHide, Grab) are NOT interrupted by return
 	if entry.State ~= "Return" and entry.State ~= "Chase" and entry.State ~= "Attack"
-		and entry.State ~= "WaitAtEdge" and entry.State ~= "Flee" then
+		and entry.State ~= "WaitAtEdge" and entry.State ~= "Flee"
+		and entry.State ~= "HideTree" and entry.State ~= "HideUnderground"
+		and entry.State ~= "SeekHide" and entry.State ~= "Grab" then
 		if t >= (entry.ReturnCooldownUntil or 0) and self:_shouldReturn(entry) then
 			self:_setState(entry, "Return")
 		end
@@ -1443,6 +1644,20 @@ function AIService:_stepOne(entry: AIEntry)
 	---------- FLEE ----------
 	if entry.State == "Flee" then
 		entry.Humanoid.WalkSpeed = runSpeed
+
+		-- Ambush opportunistic grab: if a player is within attack range while fleeing,
+		-- 80% chance to grab them — assassins can't resist a close target
+		if entry.IsAmbush and t >= entry.NextAttackAt then
+			local near, nearD = pickNearestPlayer(pos, attackRange)
+			if near and nearD <= attackRange and math.random() < 0.8 then
+				entry.Target = near
+				entry.FleeUntil = 0
+				entry._fleeCommitted = nil
+				self:_setState(entry, "Chase") -- will transition to Attack on next tick
+				return
+			end
+		end
+
 		local from = entry.FleeFrom
 		local fromHRP = from and getCharHRP(from) or nil
 		if not fromHRP then
@@ -1503,8 +1718,13 @@ function AIService:_stepOne(entry: AIEntry)
 		safeSetAnim(entry, "Run")
 
 		if t >= entry.FleeUntil then
+			-- Ambush brainrots: always go to SeekHide after flee
+			if entry.IsAmbush then
+				entry._fleeCommitted = nil
+				entry.Target = nil
+				self:_setState(entry, "SeekHide")
 			-- Committed flee (FleeAfterAttack): always return, never re-chase
-			if entry._fleeCommitted then
+			elseif entry._fleeCommitted then
 				entry._fleeCommitted = nil
 				entry.Target = nil
 				self:_setState(entry, "Return")
@@ -1638,11 +1858,11 @@ function AIService:_stepOne(entry: AIEntry)
 		if dToTarget <= 5 or insideTerritory then
 			entry.ReturnTarget = nil
 			entry.ReturnCooldownUntil = now() + 3 -- brief cooldown before leash re-checks
-			self:_setState(entry, "Idle")
+			self:_setState(entry, if entry.IsAmbush then "SeekHide" else "Idle")
 		elseif not entry.Territory and (pos - entry.SpawnPos).Magnitude <= 12 then
 			entry.ReturnTarget = nil
 			entry.ReturnCooldownUntil = now() + 3
-			self:_setState(entry, "Idle")
+			self:_setState(entry, if entry.IsAmbush then "SeekHide" else "Idle")
 		end
 		return
 	end
@@ -1655,7 +1875,7 @@ function AIService:_stepOne(entry: AIEntry)
 
 		if not thrp or not thum or thum.Health <= 0 then
 			entry.Target = nil
-			self:_setState(entry, "Idle")
+			self:_setState(entry, if entry.IsAmbush then "SeekHide" else "Idle")
 			return
 		end
 
@@ -1895,6 +2115,276 @@ function AIService:_stepOne(entry: AIEntry)
 		return
 	end
 
+	---------- AMBUSH STATES (SeekHide / HideTree / HideUnderground / Grab) ----------
+	if entry.State == "SeekHide" then
+		entry.Humanoid.WalkSpeed = runSpeed
+		safeSetAnim(entry, "Run")
+
+		-- Choose hide type: 4:1 favoring underground over tree
+		local treeTag = entry.P.TreeTag or "Tree"
+		if not entry.HideType then
+			local roll = math.random(1, AMBUSH_DIG_WEIGHT + 1) -- 1-5: 1=tree, 2-5=dig
+			if roll == 1 then
+				-- Try to find a tree with an open side
+				local bestTree: BasePart? = nil
+				local bestDist = math.huge
+				for _, tree in ipairs(CollectionService:GetTagged(treeTag)) do
+					local treePart = if tree:IsA("Model") then tree.PrimaryPart else tree
+					if treePart and treePart:IsA("BasePart") then
+						-- Check if tree has open sides
+						local occ = _treeSideOccupants[treePart]
+						local usedCount = 0
+						if occ then for _ in pairs(occ) do usedCount += 1 end end
+						if usedCount < AMBUSH_MAX_PER_TREE then
+							local d = (treePart.Position - pos).Magnitude
+							if d < bestDist and d < 200 then
+								bestDist = d
+								bestTree = treePart
+							end
+						end
+					end
+				end
+				if bestTree then
+					entry.HideSpot = bestTree
+					entry.HideType = "tree"
+				else
+					entry.HideType = "underground" -- no tree available, dig
+				end
+			else
+				entry.HideType = "underground"
+			end
+		end
+
+		if entry.HideType == "tree" and entry.HideSpot then
+			local treePart = entry.HideSpot
+			local dToTree = (Vector3.new(treePart.Position.X, pos.Y, treePart.Position.Z) - pos).Magnitude
+			if dToTree <= 6 then
+				-- Arrived at tree — claim a side
+				local side = claimTreeSide(treePart, entry.Id)
+				if not side then
+					-- Tree full, dig instead
+					entry.HideSpot = nil
+					entry.HideType = "underground"
+				else
+					entry.HideTreeSide = side
+					local hpLo, hpHi = pRange(entry.P, "HidePatience", 15, 30)
+					entry.HideUntil = now() + randRange(hpLo, hpHi)
+					if entry.HRP and entry.HRP.Parent then
+						entry.HRP.Anchored = true
+						-- Climb target: top of the claimed side (not center)
+						local sideOffset = getTreeSideOffset(treePart, side)
+						local treeTopSide = treePart.Position
+							+ Vector3.new(0, treePart.Size.Y * 0.5 + 2, 0)
+							+ sideOffset
+						-- Face outward from tree
+						local lookDir = sideOffset.Unit
+						local targetCF = CFrame.new(treeTopSide, treeTopSide + lookDir)
+						startAmbushTween(entry, targetCF, TWEEN_CLIMB_TIME)
+					end
+					self:_setState(entry, "HideTree")
+				end
+			else
+				moveToward(entry, treePart.Position)
+			end
+			-- If we switched to underground above, fall through
+			if entry.HideType == "tree" then return end
+		end
+
+		if entry.HideType == "underground" then
+			-- Dig underground: anchor and start sink tween
+			local hpLo2, hpHi2 = pRange(entry.P, "HidePatience", 15, 30)
+			entry.HideUntil = now() + randRange(hpLo2, hpHi2)
+			if entry.HRP and entry.HRP.Parent then
+				-- Compute upright ground CFrame regardless of current orientation
+				-- Raycast down to find the actual ground surface
+				local hrpPos = entry.HRP.Position
+				local rayOrigin = Vector3.new(hrpPos.X, hrpPos.Y + 10, hrpPos.Z)
+				local rayParams = RaycastParams.new()
+				rayParams.FilterType = Enum.RaycastFilterType.Exclude
+				rayParams.FilterDescendantsInstances = { entry.Model }
+				local rayResult = Workspace:Raycast(
+					rayOrigin,
+					Vector3.new(0, -100, 0),
+					rayParams
+				)
+				local groundY = rayResult and rayResult.Position.Y or hrpPos.Y
+				-- Place HRP center at ground level + half HRP height (standing on ground)
+				local halfH = entry.HRP.Size.Y * 0.5
+				local uprightPos = Vector3.new(hrpPos.X, groundY + halfH, hrpPos.Z)
+				-- Keep the monkey's facing direction (yaw only), discard tilt/roll
+				local lookDir = entry.HRP.CFrame.LookVector
+				local flatLook = Vector3.new(lookDir.X, 0, lookDir.Z)
+				if flatLook.Magnitude < 0.01 then flatLook = Vector3.new(0, 0, -1) end
+				flatLook = flatLook.Unit
+
+				local uprightCF = CFrame.new(uprightPos, uprightPos + flatLook)
+				entry.OriginalCFrame = uprightCF -- pop-back target is upright on ground
+
+				entry.HRP.Anchored = true
+				-- Sink 80% of HRP height below the upright ground position
+				local sinkDepth = entry.HRP.Size.Y * 0.8
+				local sunkCF = uprightCF - Vector3.new(0, sinkDepth, 0)
+				startAmbushTween(entry, sunkCF, TWEEN_DIG_TIME)
+			end
+			self:_setState(entry, "HideUnderground")
+		end
+		return
+	end
+
+	if entry.State == "HideTree" then
+		local treePart = entry.HideSpot
+		if not treePart or not treePart.Parent then
+			-- Tree removed, cancel tween, release side, unanchor, seek new spot
+			cancelAmbushTween(entry)
+			releaseTreeSide(entry.HideSpot, entry.Id)
+			entry.HideSpot = nil
+			entry.HideTreeSide = nil
+			if entry.HRP then entry.HRP.Anchored = false end
+			self:_setState(entry, "SeekHide")
+			return
+		end
+
+		entry.Humanoid.WalkSpeed = 0
+
+		-- Still climbing? Wait for tween to finish
+		if entry.HideTween and not entry.HideTweenDone then
+			return
+		end
+
+		-- At tree side top — scan for players (horizontal range + directly below)
+		local sideOffset = entry.HideTreeSide and getTreeSideOffset(treePart, entry.HideTreeSide) or Vector3.zero
+		local hidePos = treePart.Position + Vector3.new(0, treePart.Size.Y * 0.5 + 2, 0) + sideOffset
+		local ambushRange = pNumber(entry.P, "AmbushRange", 25)
+		local near, nearDist = pickNearestPlayer(hidePos, ambushRange)
+		-- Also detect players walking directly under the tree (XZ within tree footprint + padding)
+		if not near then
+			local treeBase = treePart.Position
+			local padX = treePart.Size.X * 0.5 + 8 -- generous padding
+			local padZ = treePart.Size.Z * 0.5 + 8
+			for _, plr in ipairs(Players:GetPlayers()) do
+				local phrp = getCharHRP(plr)
+				if phrp then
+					local dx = math.abs(phrp.Position.X - treeBase.X)
+					local dz = math.abs(phrp.Position.Z - treeBase.Z)
+					if dx <= padX and dz <= padZ and phrp.Position.Y < treeBase.Y + treePart.Size.Y * 0.5 then
+						near = plr
+						break
+					end
+				end
+			end
+		end
+		if near then
+			-- Jump off tree — physics freefall! Unanchor and let gravity do the work
+			entry.Target = near
+			entry.NextAttackAt = 0 -- attack IMMEDIATELY after landing
+			releaseTreeSide(treePart, entry.Id)
+			entry.HideSpot = nil
+			entry.HideType = nil
+			entry.HideTreeSide = nil
+			cancelAmbushTween(entry)
+			if entry.HRP and entry.HRP.Parent then
+				entry.HRP.Anchored = false
+			end
+			self:_setState(entry, "Chase")
+			return
+		end
+
+		-- Patience timer: freefall off tree, then relocate
+		if t >= (entry.HideUntil or 0) then
+			releaseTreeSide(treePart, entry.Id)
+			entry.HideSpot = nil
+			entry.HideType = nil
+			entry.HideTreeSide = nil
+			cancelAmbushTween(entry)
+			if entry.HRP and entry.HRP.Parent then
+				entry.HRP.Anchored = false
+			end
+			self:_setState(entry, "SeekHide")
+		end
+		return
+	end
+
+	if entry.State == "HideUnderground" then
+		entry.Humanoid.WalkSpeed = 0
+
+		-- Phase 1: Sinking tween playing — wait
+		if entry.HideTween and not entry.HideTweenDone then
+			return
+		end
+
+		-- Phase 2: Popping up — tween is playing back to surface (still anchored)
+		-- _popTarget stores who/what triggered the pop so we know where to go after
+		if entry._popping then
+			-- Still tweening up? Wait
+			if entry.HideTween and not entry.HideTweenDone then
+				return
+			end
+			-- Pop tween finished — HRP is at OriginalCFrame, fully above ground
+			-- NOW unanchor and transition
+			if entry.HRP and entry.HRP.Parent then
+				entry.HRP.Anchored = false
+			end
+			local nextState = entry._popNextState or "SeekHide"
+			entry._popping = nil
+			entry._popNextState = nil
+			entry.OriginalCFrame = nil
+			entry.HideSpot = nil
+			entry.HideType = nil
+			self:_setState(entry, nextState)
+			return
+		end
+
+		-- Phase 3: Fully underground, waiting — only pop when player is VERY close
+		-- Use AmbushPopRange (fraction of attackRange) for underground detection
+		local popFraction = pNumber(entry.P, "AmbushPopRange", 0.5)
+		local undergroundPopRange = attackRange * popFraction
+		local scanPos = entry.OriginalCFrame and entry.OriginalCFrame.Position or pos
+		local near, nearDist = pickNearestPlayer(scanPos, undergroundPopRange)
+		if near then
+			-- Start pop-out tween (stay anchored during tween)
+			entry.Target = near
+			entry.NextAttackAt = 0 -- attack IMMEDIATELY after popping out
+			if entry.OriginalCFrame and entry.HRP and entry.HRP.Parent then
+				cancelAmbushTween(entry)
+				startAmbushTween(entry, entry.OriginalCFrame, TWEEN_POP_TIME)
+				entry._popping = true
+				entry._popNextState = "Chase"
+			end
+			return
+		end
+
+		-- Patience timer: pop out, then relocate
+		if t >= (entry.HideUntil or 0) then
+			if entry.OriginalCFrame and entry.HRP and entry.HRP.Parent then
+				cancelAmbushTween(entry)
+				startAmbushTween(entry, entry.OriginalCFrame, TWEEN_POP_TIME)
+				entry._popping = true
+				entry._popNextState = "SeekHide"
+			end
+		end
+		return
+	end
+
+	if entry.State == "Grab" then
+		-- GrabAttack module manages the grab loop. AI just waits.
+		-- If grab ended (GrabTarget cleared by GrabAttack), transition out.
+		if not entry.GrabTarget then
+			-- Grab ended — flee to re-hide
+			local near = pickNearestPlayer(pos, 100)
+			if near then
+				entry.FleeFrom = near
+				entry.FleeUntil = now() + pNumber(entry.P, "FearTime", 3.0)
+				entry._fleeCommitted = true
+				local chaseThreshold = entry.AC and entry.AC.ChaseThreshold or 35
+				entry.Aggro = math.min(entry.Aggro, chaseThreshold * 0.5)
+				self:_setState(entry, "Flee")
+			else
+				self:_setState(entry, "SeekHide")
+			end
+		end
+		return
+	end
+
 	---------- IDLE / WANDER ----------
 	if entry.State == "Idle" then
 		entry.Humanoid.WalkSpeed = 0
@@ -2009,6 +2499,11 @@ local MOVE_VELOCITY_THRESHOLD = 1.0 -- studs/sec; below this = "not moving"
 function AIService:_velocityAnimCheck(entry: AIEntry)
 	if entry.State == "Dead" then return end
 
+	-- Skip for hidden/grab states (brainrot is intentionally stationary)
+	if entry.State == "HideTree" or entry.State == "HideUnderground" or entry.State == "Grab" then
+		return
+	end
+
 	-- Locomotion modules can opt out of forced idle (e.g. RollLocomotion)
 	local loco = entry.Locomotion
 	if loco and type(loco.IsImmuneToForcedIdle) == "function" and loco:IsImmuneToForcedIdle() then
@@ -2082,6 +2577,7 @@ local MOVEMENT_STATES: { [AIStateName]: boolean } = {
 	Chase = true,
 	Flee = true,
 	Return = true,
+	SeekHide = true,
 }
 
 function AIService:_stuckHopCheck(entry: AIEntry)

@@ -249,6 +249,21 @@ local AttackConfig = {
 			Projectile = "Bomb",
 			AoERadius = 12,
 		},
+
+		---------- GRAB ----------
+		GrabAttack = {
+			Type = "Melee",
+			Weight = "Heavy",
+			Range = 6,
+			Cooldown = 3.0,
+			WindupTime = 0.3,
+			DamageMult = 1.0,
+			TickDamage = 2,          -- damage per tick while grabbed
+			TickInterval = 1.0,      -- seconds between ticks
+			BreakThreshold = 70,     -- breakpower needed to escape (4 fast jumps)
+			JumpPower = 20,          -- breakpower per jump
+			BreakDecay = 4,          -- breakpower lost per second
+		},
 	},
 }
 

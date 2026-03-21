@@ -898,6 +898,78 @@ local BrainrotConfig = {
 		RarityName = "Uncommon",
 		Personality = "Skittish",
 	},
+
+	-----------------------------------------------------------------------
+	-- Orangutini Ananassini — Ambush Assassin Monkey
+	-- Hides in trees or underground, leaps out to grab players.
+	-- Players must spam-jump to break free (breakpower mechanic).
+	-- Never idles in the open — always hiding or traveling to a hiding spot.
+	-----------------------------------------------------------------------
+	["Orangutini_Ananassini"] = {
+		DisplayName = "Orangutini Ananassini",
+
+		Health = 350,
+		Walkspeed = 12,
+		Runspeed = 28,           -- quick but not crazy
+
+		Attackspeed = 28,
+		HealRate = 0,
+
+		AttackDamage = 2,        -- very low tick damage while grabbing
+		AttackRange = 15,        -- grab reach
+		AttackCooldown = 0.3,    -- near-instant re-grab
+
+		Price = 15000,
+		RarityName = "Rare",
+
+		Personality = "Ambush",
+		LocomotionType = "Walk",
+
+		AttackMoves = { "GrabAttack" },
+
+		PersonalityOverrides = {
+			AmbushBehavior = true,        -- flag: AIService uses ambush state machine
+			AggroDistance = 18,            -- very short — only reacts when close
+			ChaseRange = 30,              -- short chase — if you escape, it re-hides
+			HidePatience = { 15, 30 },    -- seconds to wait in hide before relocating
+			AmbushRange = 18,             -- only pop when player is close
+			AmbushPopRange = 0.5,         -- underground: pop at 50% of attack range
+			FleeDistance = 100,           -- min flee distance before digging underground
+			TreeTag = "Tree",             -- CollectionService tag for climbable trees
+			RunWhenAttacked = 0.95,       -- almost always flees when hit
+		},
+
+		AggroCurveOverrides = {
+			ChaseThreshold = 5,           -- binary: any proximity = instant chase
+			ProximityRate = 50,           -- aggro maxes immediately when close
+		},
+
+		MoveOverrides = {
+			GrabAttack = {
+				Range = 15,
+				Cooldown = 0.3,
+				WindupTime = 0,      -- zero windup — instant assassin grab
+				FleeAfterAttack = true,
+				TickDamage = 2,
+				TickInterval = 1.0,
+				BreakThreshold = 70,
+				JumpPower = 20,
+				BreakDecay = 4,
+			},
+		},
+
+		Variants = {
+			{ Name = "Normal", Weight = 60 },
+			{ Name = "Baby", Weight = 20, NameTag = "(Baby)", SizeMultiplier = 0.6, SizeTier = "baby",
+			  StatOverrides = { AttackDamage = 0.5, Health = 0.5 } },
+			{ Name = "Silverback", Weight = 15, NameTag = "(Silverback)", SizeMultiplier = 1.3, SizeTier = "big",
+			  StatOverrides = { Health = 1.5, AttackDamage = 1.5 },
+			  VariantMoveOverrides = { GrabAttack = { BreakThreshold = 95 } } },
+			{ Name = "King", Weight = 5, NameTag = "(King)", SizeMultiplier = 1.8, SizeTier = "huge",
+			  StatOverrides = { Health = 2.5, AttackDamage = 2.0 },
+			  VariantMoveOverrides = { GrabAttack = { BreakThreshold = 120, BreakDecay = 6 } } },
+		},
+	},
 }
 
 return BrainrotConfig

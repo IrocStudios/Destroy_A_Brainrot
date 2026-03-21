@@ -527,6 +527,11 @@ function BrainrotClient:_updateRange()
 				if entry.Body and entry.Body.Parent then
 					self:_refreshAnim(entry)
 				end
+				-- Ambush brainrots: hide billboard when burrowed or in tree
+				if entry.Billboard then
+					local hide = entry.Model:GetAttribute("HideBillboard")
+					entry.Billboard.Enabled = not hide
+				end
 			else
 				self:_detach(entry)
 			end

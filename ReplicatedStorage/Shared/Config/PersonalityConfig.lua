@@ -508,6 +508,66 @@ local PersonalityConfig = {
 			FleeThreshold = 0,
 		},
 	},
+
+	----------------------------------------------------------------------
+	-- Ambush: Hides in trees or underground, leaps out to grab players.
+	-- Never idles in the open. Flees to re-hide after attacks.
+	----------------------------------------------------------------------
+	Ambush = {
+		-- Assassin: hides, waits, grabs when close, flees when exposed
+		Aggressive = 0.40,
+		AggroDistance = 18,            -- very short — only reacts up close
+		ChaseRange = 30,              -- short chase leash — re-hides if target escapes
+		AttackRange = 15,
+		AttackChance = 0.95,          -- almost always attacks if in range
+		RunChance = 0.02,             -- rarely flees randomly (only on damage)
+		RunWhenAttacked = 0.95,       -- almost always flees when hit while exposed
+
+		IdleFrequency = { 0.3, 0.6 },
+		WanderPause = { 0.2, 0.5 },
+		FearTime = 4.0,               -- long flee — gets far away before re-hiding
+		FearDistance = 15,
+
+		PreferRanged = 0.0,           -- melee only (grab)
+		HeavyAttackBias = 1.0,       -- always heavy (GrabAttack is Heavy)
+
+		RetaliateOnDamage = false,    -- never fights back — always runs
+		RetaliateAggression = 0.0,
+		PursuitTenacity = 0.15,       -- gives up chase quickly if target runs
+		CorneredAggression = 0.3,     -- even cornered, prefers to flee
+		TerritoryTenacity = 0.2,
+		LeashStrength = 0.8,          -- tight leash — sticks near territory
+
+		FleeStyle = "scatter",
+
+		DefaultAttackMoves = { "GrabAttack" },
+
+		ExclusionBehavior = {
+			LowThreshold = 20,
+			WaitAtEdge = false,
+			WaitPatience = 0,
+			PushThroughCost = 0.8,
+		},
+
+		AggroCurve = {
+			IdleAggro = 0,             -- completely calm at rest
+			DamageGain = 5,            -- damage doesn't make them angry, just scared
+			ProximityRate = 50,        -- aggro spikes instantly when player is close
+			TerritoryRate = 5,
+			CorneredRate = 10,
+			PackGain = 0,
+			DecayRate = 20,            -- aggro drops fast — lose interest quickly
+			TerritoryDecayMult = 3.0,
+			OutOfSightDecay = 30,      -- forgets VERY fast when player leaves
+			DecayDelay = 0.5,
+			AccelDecayMult = 2.0,
+			ChaseThreshold = 5,        -- binary: any proximity = instant reaction
+			PursuitThreshold = 15,
+			BerserkThreshold = 90,     -- almost never berserks
+			FleeInversion = false,
+			FleeThreshold = 0,
+		},
+	},
 }
 
 return PersonalityConfig
