@@ -295,6 +295,15 @@ function BrainrotClient:_refreshAnim(entry: ActiveEntry)
 		desired = "Idle"
 	end
 
+	-- "None" = stop all animations (e.g. buried underground)
+	if desired == "None" then
+		for _, track in pairs(entry.AnimTracks) do
+			if track.IsPlaying then track:Stop(0.1) end
+		end
+		entry.LastPlayedAnimName = "None"
+		return
+	end
+
 	local animFolder = entry.Body:FindFirstChild("Animations")
 	if not animFolder or not animFolder:IsA("Folder") then
 		return

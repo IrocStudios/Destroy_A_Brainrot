@@ -874,12 +874,22 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		entry.Target = nil
 		safeSetAnim(entry, "Walk")
 	elseif state == "Chase" then
-		if entry.IsAmbush then entry.Model:SetAttribute("HideBillboard", false) end
+		if entry.IsAmbush then
+			-- Defensive cleanup: ensure not stuck anchored from a hiding state
+			cancelAmbushTween(entry)
+			if entry.HRP and entry.HRP.Parent then entry.HRP.Anchored = false end
+			entry.Model:SetAttribute("HideBillboard", false)
+		end
 		safeSetAnim(entry, "Run")
 	elseif state == "Attack" then
 		safeSetAnim(entry, "Attack")
 	elseif state == "Flee" then
-		if entry.IsAmbush then entry.Model:SetAttribute("HideBillboard", false) end
+		if entry.IsAmbush then
+			-- Defensive cleanup: ensure not stuck anchored from a hiding state
+			cancelAmbushTween(entry)
+			if entry.HRP and entry.HRP.Parent then entry.HRP.Anchored = false end
+			entry.Model:SetAttribute("HideBillboard", false)
+		end
 		safeSetAnim(entry, "Run")
 	elseif state == "Return" then
 		entry.Target = nil
@@ -893,10 +903,16 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		safeSetAnim(entry, "Idle")
 	elseif state == "SeekHide" then
 		entry.Target = nil
+		-- Full ambush state cleanup: cancel tweens, unanchor, release tree side
+		cancelAmbushTween(entry)
+		if entry.HRP and entry.HRP.Parent then entry.HRP.Anchored = false end
+		releaseTreeSide(entry.HideSpot, entry.Id)
 		entry.HideSpot = nil
 		entry.HideType = nil
+		entry.HideTreeSide = nil
 		entry._popping = nil
 		entry._popNextState = nil
+		entry.OriginalCFrame = nil
 		entry.Model:SetAttribute("HideBillboard", false)
 		safeSetAnim(entry, "Run")
 	elseif state == "HideTree" then
@@ -905,20 +921,20 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 			entry.Locomotion:Stop(entry)
 		end
 		entry.Model:SetAttribute("HideBillboard", true)
-		safeSetAnim(entry, "Idle")
+		safeSetAnim(entry, "Climb") -- climbing up; switches to Idle after tween done
 	elseif state == "HideUnderground" then
 		entry.Humanoid.WalkSpeed = 0
 		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
 			entry.Locomotion:Stop(entry)
 		end
 		entry.Model:SetAttribute("HideBillboard", true)
-		safeSetAnim(entry, "Idle")
+		safeSetAnim(entry, "None") -- no animation while buried underground
 	elseif state == "Grab" then
 		entry.Humanoid.WalkSpeed = 0
 		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
 			entry.Locomotion:Stop(entry)
 		end
-		safeSetAnim(entry, "Attack")
+		safeSetAnim(entry, "Grab") -- looped hold animation while grabbing
 	elseif state == "Dead" then
 		entry.Target = nil
 		entry.WanderTarget = nil
@@ -2250,6 +2266,9 @@ function AIService:_stepOne(entry: AIEntry)
 		if entry.HideTween and not entry.HideTweenDone then
 			return
 		end
+
+		-- Climb tween done — sitting at tree top, switch to Idle
+		safeSetAnim(entry, "Idle")
 
 		-- At tree side top — scan for players (horizontal range + directly below)
 		local sideOffset = entry.HideTreeSide and getTreeSideOffset(treePart, entry.HideTreeSide) or Vector3.zero

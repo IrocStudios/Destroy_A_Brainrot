@@ -88,6 +88,12 @@ function GrabAttack:Execute(entry: any, target: any, services: any, moveConfig: 
 	entry.State = "Grab"
 	entry.GrabTarget = target
 
+	-- Switch to looped Grab hold animation (replaces the brief attack_Grab)
+	local animSv = entry.Model and entry.Model:FindFirstChild("CurrentAnimation")
+	if animSv and animSv:IsA("StringValue") then
+		animSv.Value = "Grab"
+	end
+
 	-- Middleman part: player welds to this, this welds to monkey.
 	-- When monkey dies, we destroy the middleman → player is safely released.
 	-- Direct weld to monkey HRP would rip the player when the monkey model is destroyed.

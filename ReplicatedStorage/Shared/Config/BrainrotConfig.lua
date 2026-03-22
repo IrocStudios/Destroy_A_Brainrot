@@ -959,13 +959,13 @@ local BrainrotConfig = {
 		},
 
 		Variants = {
-			{ Name = "Normal", Weight = 60 },
+			{ Name = "Normal", Weight = 64 },
 			{ Name = "Baby", Weight = 20, NameTag = "(Baby)", SizeMultiplier = 0.6, SizeTier = "baby",
 			  StatOverrides = { AttackDamage = 0.5, Health = 0.5 } },
 			{ Name = "Silverback", Weight = 15, NameTag = "(Silverback)", SizeMultiplier = 1.3, SizeTier = "big",
 			  StatOverrides = { Health = 1.5, AttackDamage = 1.5 },
 			  VariantMoveOverrides = { GrabAttack = { BreakThreshold = 95 } } },
-			{ Name = "King", Weight = 5, NameTag = "(King)", SizeMultiplier = 1.8, SizeTier = "huge",
+			{ Name = "King", Weight = 1, NameTag = "(King)", SizeMultiplier = 1.8, SizeTier = "huge",
 			  StatOverrides = { Health = 2.5, AttackDamage = 2.0 },
 			  VariantMoveOverrides = { GrabAttack = { BreakThreshold = 120, BreakDecay = 6 } } },
 		},

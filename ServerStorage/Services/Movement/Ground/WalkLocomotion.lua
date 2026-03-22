@@ -2,6 +2,11 @@
 -- WalkLocomotion
 -- Ground-based pathfinding locomotion using PathfindingService.
 -- Replaces raw Humanoid:MoveTo() with proper waypoint-following navigation.
+--
+-- IMPORTANT: ComputeAsync runs in a background thread (task.spawn) so the
+-- evaluator Heartbeat never yields.  While a new path is computing, the
+-- brainrot keeps following its old waypoints or uses safe-fallback direct
+-- movement — no micro-pauses.
 
 local PathfindingService = game:GetService("PathfindingService")
 local Workspace = game:GetService("Workspace")
@@ -22,14 +27,16 @@ export type WalkState = {
 	WaypointIndex: number,
 	TargetPos: Vector3?,
 	LastComputeAt: number,
+	Computing: boolean,
 	BlockedConn: RBXScriptConnection?,
 	ReachedConn: RBXScriptConnection?,
 }
 
 local RECOMPUTE_INTERVAL = 0.5       -- seconds between path re-computes
 local RECOMPUTE_DIST_THRESHOLD = 4   -- re-compute if target moved this far (1 voxel)
-local WAYPOINT_REACH_DIST = 3        -- how close to a waypoint before advancing
+local WAYPOINT_REACH_DIST = 4        -- how close before advancing past a waypoint (>= WaypointSpacing)
 local DIRECT_MOVE_DIST = 16          -- within this range, skip pathfinding and MoveTo directly
+local LOOK_AHEAD = 3                 -- MoveTo this many waypoints ahead of current (blends turns)
 
 ----------------------------------------------------------------------
 -- Helpers
@@ -66,6 +73,7 @@ local function getState(entry: any): WalkState
 			WaypointIndex = 1,
 			TargetPos = nil,
 			LastComputeAt = 0,
+			Computing = false,
 			BlockedConn = nil,
 			ReachedConn = nil,
 		}
@@ -108,7 +116,11 @@ function WalkLocomotion:MoveTo(entry: any, targetPos: Vector3)
 	-- For very short distances, use safe fallback (raycast check, no pathfinding overhead)
 	local dist = distXZ(currentPos, targetPos)
 	if dist < DIRECT_MOVE_DIST then
-		cleanupPath(state)
+		-- Don't clean up path if a background compute is still running —
+		-- it will swap itself in when ready.  Just stop following old waypoints.
+		if not state.Computing then
+			cleanupPath(state)
+		end
 		state.TargetPos = targetPos
 		self:_safeFallbackMove(entry, targetPos)
 		return
@@ -116,9 +128,9 @@ function WalkLocomotion:MoveTo(entry: any, targetPos: Vector3)
 
 	-- Check if we need to recompute the path
 	local needsRecompute = false
-	if not state.Path then
+	if not state.Path and not state.Computing then
 		needsRecompute = true
-	elseif now - state.LastComputeAt > RECOMPUTE_INTERVAL then
+	elseif not state.Computing and now - state.LastComputeAt > RECOMPUTE_INTERVAL then
 		if state.TargetPos then
 			local targetMoved = distXZ(targetPos, state.TargetPos) > RECOMPUTE_DIST_THRESHOLD
 			if targetMoved then
@@ -133,8 +145,14 @@ function WalkLocomotion:MoveTo(entry: any, targetPos: Vector3)
 		self:_computePath(entry, targetPos)
 	end
 
-	-- Follow current waypoint
-	self:_followWaypoints(entry)
+	-- Follow current waypoints if we have them; otherwise safe-fallback
+	-- so the brainrot keeps moving while a new path computes.
+	if #state.Waypoints > 0 then
+		self:_followWaypoints(entry)
+	else
+		state.TargetPos = targetPos
+		self:_safeFallbackMove(entry, targetPos)
+	end
 end
 
 function WalkLocomotion:Stop(entry: any)
@@ -211,7 +229,7 @@ function WalkLocomotion:_safeFallbackMove(entry: any, targetPos: Vector3)
 end
 
 ----------------------------------------------------------------------
--- Path computation
+-- Path computation (non-blocking — runs in task.spawn)
 ----------------------------------------------------------------------
 
 function WalkLocomotion:_computePath(entry: any, targetPos: Vector3)
@@ -219,50 +237,60 @@ function WalkLocomotion:_computePath(entry: any, targetPos: Vector3)
 	if not hrp then return end
 
 	local state = getState(entry)
-	cleanupPath(state)
 
+	-- Record intent immediately so the recompute check doesn't fire again
+	-- while this computation is in flight.
 	state.TargetPos = targetPos
 	state.LastComputeAt = os.clock()
+	state.Computing = true
 
+	-- Capture values needed inside the background thread
+	local startPos = hrp.Position
 	local pathParams = buildPathParams(entry)
-	local path = PathfindingService:CreatePath(pathParams)
 
-	local ok, err = pcall(function()
-		path:ComputeAsync(hrp.Position, targetPos)
-	end)
+	task.spawn(function()
+		local path = PathfindingService:CreatePath(pathParams)
 
-	if not ok then
-		dprint("ComputeAsync failed:", err)
-		-- Don't fall back to raw MoveTo — it clips through walls.
-		-- Try moving toward target at a safe short distance via raycast.
-		self:_safeFallbackMove(entry, targetPos)
-		return
-	end
+		local ok, err = pcall(function()
+			path:ComputeAsync(startPos, targetPos)
+		end)
 
-	if path.Status == Enum.PathStatus.NoPath then
-		dprint("No path found, safe fallback")
-		self:_safeFallbackMove(entry, targetPos)
-		return
-	end
+		-- Mark done regardless of outcome
+		state.Computing = false
 
-	local waypoints = path:GetWaypoints()
-	if #waypoints < 2 then
-		self:_safeFallbackMove(entry, targetPos)
-		return
-	end
+		-- Validate: entry still alive?
+		if not entry.HRP or not entry.HRP.Parent then return end
 
-	state.Path = path
-	state.Waypoints = waypoints
-	state.WaypointIndex = 2 -- skip first waypoint (current position)
+		if not ok then
+			dprint("ComputeAsync failed:", err)
+			return -- next tick will fallback-move
+		end
 
-	-- Listen for path blocked
-	state.BlockedConn = path.Blocked:Connect(function(blockedWaypointIndex: number)
-		dprint("Path blocked at waypoint", blockedWaypointIndex)
-		-- Re-compute on next MoveTo call
+		if path.Status == Enum.PathStatus.NoPath then
+			dprint("No path found")
+			return -- next tick will fallback-move
+		end
+
+		local waypoints = path:GetWaypoints()
+		if #waypoints < 2 then
+			return -- next tick will fallback-move
+		end
+
+		-- Swap in the new path (clean up old connections first)
 		cleanupPath(state)
-	end)
+		state.Path = path
+		state.Waypoints = waypoints
+		state.WaypointIndex = 2 -- skip first waypoint (current position)
 
-	dprint("Path computed:", #waypoints, "waypoints")
+		-- Listen for path blocked
+		state.BlockedConn = path.Blocked:Connect(function(blockedWaypointIndex: number)
+			dprint("Path blocked at waypoint", blockedWaypointIndex)
+			-- Clear path — next MoveTo call will recompute
+			cleanupPath(state)
+		end)
+
+		dprint("Path computed:", #waypoints, "waypoints")
+	end)
 end
 
 ----------------------------------------------------------------------
@@ -294,7 +322,7 @@ function WalkLocomotion:_followWaypoints(entry: any)
 		end
 	end
 
-	-- If we've passed all waypoints, we're done
+	-- If we've passed all waypoints, path is done — move to final target
 	if state.WaypointIndex > #state.Waypoints then
 		cleanupPath(state)
 		if state.TargetPos then
@@ -303,14 +331,19 @@ function WalkLocomotion:_followWaypoints(entry: any)
 		return
 	end
 
-	local wp = state.Waypoints[state.WaypointIndex]
-
-	-- Handle jump waypoints
-	if wp.Action == Enum.PathWaypointAction.Jump then
-		hum.Jump = true
+	-- Process jump actions on any upcoming waypoints we'll traverse
+	for i = state.WaypointIndex, math.min(state.WaypointIndex + LOOK_AHEAD, #state.Waypoints) do
+		if state.Waypoints[i].Action == Enum.PathWaypointAction.Jump then
+			hum.Jump = true
+			break
+		end
 	end
 
-	hum:MoveTo(wp.Position)
+	-- Look-ahead: MoveTo a waypoint several steps ahead of the current one.
+	-- This prevents the Humanoid from reaching its target between ticks and
+	-- pausing — it always has a further destination and blends turns smoothly.
+	local aheadIdx = math.min(state.WaypointIndex + LOOK_AHEAD, #state.Waypoints)
+	hum:MoveTo(state.Waypoints[aheadIdx].Position)
 end
 
 return WalkLocomotion
