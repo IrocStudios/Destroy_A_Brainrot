@@ -110,6 +110,7 @@ type AIEntry = {
 	HideTreeSide: string?,        -- "north"|"south"|"east"|"west" — claimed side of tree
 	GrabTarget: Player?,          -- player currently grabbed
 	OriginalCFrame: CFrame?,      -- saved CFrame before hiding (for restore)
+	TreeWeld: WeldConstraint?,    -- weld locking monkey to tree top
 
 	-- Plant drop (ambush monkey camouflage)
 	PlantDrops: { Model }?,       -- active plants dropped (max PLANT_DROP_MAX)
@@ -499,6 +500,13 @@ local function startAmbushTween(entry: any, targetCFrame: CFrame, duration: numb
 
 	entry.HideTween = tween
 	tween:Play()
+end
+
+local function destroyTreeWeld(entry: any)
+	if entry.TreeWeld then
+		pcall(function() entry.TreeWeld:Destroy() end)
+		entry.TreeWeld = nil
+	end
 end
 
 local function cancelAmbushTween(entry: any)
@@ -948,7 +956,8 @@ function AIService:Unregister(brainrotId: string)
 		entry.Locomotion:Cleanup(entry)
 	end
 
-	-- Release tree side if still holding one
+	-- Release tree side and weld if still holding
+	destroyTreeWeld(entry)
 	if entry.HideSpot then
 		releaseTreeSide(entry.HideSpot, entry.Id)
 	end
@@ -986,8 +995,9 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		safeSetAnim(entry, "Walk")
 	elseif state == "Chase" then
 		if entry.IsAmbush then
-			-- Defensive cleanup: ensure not stuck anchored from a hiding state
+			-- Defensive cleanup: ensure not stuck from a hiding state
 			cancelAmbushTween(entry)
+			destroyTreeWeld(entry)
 			if entry.HRP and entry.HRP.Parent then entry.HRP.Anchored = false end
 			entry.Model:SetAttribute("HideBillboard", false)
 		end
@@ -996,8 +1006,9 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		safeSetAnim(entry, "Attack")
 	elseif state == "Flee" then
 		if entry.IsAmbush then
-			-- Defensive cleanup: ensure not stuck anchored from a hiding state
+			-- Defensive cleanup: ensure not stuck from a hiding state
 			cancelAmbushTween(entry)
+			destroyTreeWeld(entry)
 			if entry.HRP and entry.HRP.Parent then entry.HRP.Anchored = false end
 			entry.Model:SetAttribute("HideBillboard", false)
 		end
@@ -1014,8 +1025,9 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		safeSetAnim(entry, "Idle")
 	elseif state == "SeekHide" then
 		entry.Target = nil
-		-- Full ambush state cleanup: cancel tweens, unanchor, release tree side
+		-- Full ambush state cleanup: cancel tweens, destroy weld, unanchor, release tree side
 		cancelAmbushTween(entry)
+		destroyTreeWeld(entry)
 		if entry.HRP and entry.HRP.Parent then entry.HRP.Anchored = false end
 		releaseTreeSide(entry.HideSpot, entry.Id)
 		entry.HideSpot = nil
@@ -1084,24 +1096,11 @@ function AIService:_onDamaged(entry: AIEntry)
 			return
 		end
 
-		-- Shot in tree: teleport to ground at tree base, then flee
+		-- Shot in tree: destroy weld + unanchor for physics freefall
 		if entry.State == "HideTree" then
 			releaseTreeSide(entry.HideSpot, entry.Id)
-			if entry.HRP and entry.HRP.Parent and entry.HideSpot then
-				local treeBase = entry.HideSpot.Position
-				local rayP = RaycastParams.new()
-				rayP.FilterType = Enum.RaycastFilterType.Exclude
-				rayP.FilterDescendantsInstances = { entry.Model }
-				local ray = Workspace:Raycast(treeBase + Vector3.new(0, 5, 0), Vector3.new(0, -200, 0), rayP)
-				local groundY = ray and ray.Position.Y or (treeBase.Y - entry.HideSpot.Size.Y * 0.5)
-				local halfH = entry.HRP.Size.Y * 0.5
-				local landPos = Vector3.new(treeBase.X, groundY + halfH + 1, treeBase.Z)
-				entry.HRP.CFrame = CFrame.new(landPos, entry.HRP.CFrame.LookVector + landPos)
-				entry.HRP.Anchored = false
-				pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-			elseif entry.HRP then
-				entry.HRP.Anchored = false
-			end
+			destroyTreeWeld(entry)
+			if entry.HRP then entry.HRP.Anchored = false end
 			entry.HideTreeSide = nil
 		end
 		entry.HideSpot = nil
@@ -2451,9 +2450,17 @@ function AIService:_stepOne(entry: AIEntry)
 			return
 		end
 
-		-- Climb tween done — sitting at tree top, switch to Idle
-		-- Force Humanoid out of Physics state so animations play while anchored
-		pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+		-- Climb tween done — weld to tree, unanchor so Humanoid animations work
+		if not entry.TreeWeld and entry.HRP and entry.HRP.Parent then
+			local weld = Instance.new("WeldConstraint")
+			weld.Part0 = entry.HRP
+			weld.Part1 = treePart
+			weld.Name = "TreeMountWeld"
+			weld.Parent = entry.HRP
+			entry.TreeWeld = weld
+			entry.HRP.Anchored = false
+			pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+		end
 		safeSetAnim(entry, "Idle")
 
 		-- At tree side top — scan for players (horizontal range + directly below)
@@ -2479,56 +2486,31 @@ function AIService:_stepOne(entry: AIEntry)
 			end
 		end
 		if near then
-			-- Drop from tree: teleport to ground at tree base, then unanchor
+			-- Jump off tree — physics freefall!
 			entry.Target = near
 			entry.NextAttackAt = 0 -- attack IMMEDIATELY after landing
 			releaseTreeSide(treePart, entry.Id)
-			cancelAmbushTween(entry)
-			if entry.HRP and entry.HRP.Parent then
-				-- Raycast down from tree to find ground
-				local treeBase = treePart.Position
-				local rayP = RaycastParams.new()
-				rayP.FilterType = Enum.RaycastFilterType.Exclude
-				rayP.FilterDescendantsInstances = { entry.Model }
-				local ray = Workspace:Raycast(treeBase + Vector3.new(0, 5, 0), Vector3.new(0, -200, 0), rayP)
-				local groundY = ray and ray.Position.Y or (treeBase.Y - treePart.Size.Y * 0.5)
-				local halfH = entry.HRP.Size.Y * 0.5
-				local lookDir = (getCharHRP(near) and getCharHRP(near).Position or treeBase) - treeBase
-				lookDir = Vector3.new(lookDir.X, 0, lookDir.Z)
-				if lookDir.Magnitude < 0.1 then lookDir = Vector3.new(0, 0, -1) end
-				lookDir = lookDir.Unit
-				local landPos = Vector3.new(treeBase.X, groundY + halfH + 1, treeBase.Z)
-				entry.HRP.CFrame = CFrame.new(landPos, landPos + lookDir)
-				entry.HRP.Anchored = false
-				pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-			end
 			entry.HideSpot = nil
 			entry.HideType = nil
 			entry.HideTreeSide = nil
+			cancelAmbushTween(entry)
+			if entry.HRP and entry.HRP.Parent then
+				entry.HRP.Anchored = false
+			end
 			self:_setState(entry, "Chase")
 			return
 		end
 
-		-- Patience timer: drop to ground at tree base, then relocate
+		-- Patience timer: freefall off tree, then relocate
 		if t >= (entry.HideUntil or 0) then
 			releaseTreeSide(treePart, entry.Id)
-			cancelAmbushTween(entry)
-			if entry.HRP and entry.HRP.Parent then
-				local treeBase = treePart.Position
-				local rayP = RaycastParams.new()
-				rayP.FilterType = Enum.RaycastFilterType.Exclude
-				rayP.FilterDescendantsInstances = { entry.Model }
-				local ray = Workspace:Raycast(treeBase + Vector3.new(0, 5, 0), Vector3.new(0, -200, 0), rayP)
-				local groundY = ray and ray.Position.Y or (treeBase.Y - treePart.Size.Y * 0.5)
-				local halfH = entry.HRP.Size.Y * 0.5
-				local landPos = Vector3.new(treeBase.X, groundY + halfH + 1, treeBase.Z)
-				entry.HRP.CFrame = CFrame.new(landPos, entry.HRP.CFrame.LookVector + landPos)
-				entry.HRP.Anchored = false
-				pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-			end
 			entry.HideSpot = nil
 			entry.HideType = nil
 			entry.HideTreeSide = nil
+			cancelAmbushTween(entry)
+			if entry.HRP and entry.HRP.Parent then
+				entry.HRP.Anchored = false
+			end
 			self:_setState(entry, "SeekHide")
 		end
 		return
