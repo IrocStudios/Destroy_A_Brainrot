@@ -111,6 +111,10 @@ type AIEntry = {
 	GrabTarget: Player?,          -- player currently grabbed
 	OriginalCFrame: CFrame?,      -- saved CFrame before hiding (for restore)
 
+	-- Plant drop (ambush monkey camouflage)
+	PlantDrops: { Model }?,       -- active plants dropped (max PLANT_DROP_MAX)
+	NextPlantDropAt: number?,     -- next allowed drop time
+
 	Conn: { RBXScriptConnection },
 }
 
@@ -328,11 +332,113 @@ local TWEEN_CLIMB_TIME = 2.5   -- seconds to climb up tree (slower, stealthy)
 local TWEEN_DIG_TIME = 0.8     -- seconds to sink underground
 local TWEEN_POP_TIME = 0.3     -- seconds to pop out of ground
 local AMBUSH_MAX_PER_TREE = 4  -- max monkeys on one tree (one per side)
-local AMBUSH_DIG_WEIGHT = 4    -- dig:tree ratio (4:1 favors underground)
 
 -- Track which tree sides are occupied: _treeSideOccupants[treePart] = { [side] = entryId }
 local _treeSideOccupants: { [BasePart]: { [string]: string } } = {}
 local TREE_SIDES = { "north", "south", "east", "west" }
+
+-- Plant drop constants (ambush monkey camouflage)
+local PLANT_DROP_INTERVAL_MIN = 3   -- seconds between drops (minimum)
+local PLANT_DROP_INTERVAL_MAX = 7   -- seconds between drops (maximum)
+local PLANT_DROP_MAX = 6            -- max active plants per monkey
+local PLANT_DROP_LIFETIME_MIN = 60  -- seconds before plant auto-deletes
+local PLANT_DROP_LIFETIME_MAX = 180 -- seconds before plant auto-deletes
+
+-- Cache the template once
+local _plantDropTemplate: Model? = nil
+local function getPlantDropTemplate(): Model?
+	if _plantDropTemplate then return _plantDropTemplate end
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local proj = assets and assets:FindFirstChild("Projectiles")
+	local tmpl = proj and proj:FindFirstChild("plantdrop")
+	if tmpl and tmpl:IsA("Model") then
+		_plantDropTemplate = tmpl
+	end
+	return _plantDropTemplate
+end
+
+local function dropPlant(entry: any)
+	local hrp = entry.HRP
+	if not hrp or not hrp.Parent then return end
+
+	local template = getPlantDropTemplate()
+	if not template then return end
+
+	-- Prune dead plants from the list
+	local plants = entry.PlantDrops or {}
+	local alive = {}
+	for _, p in ipairs(plants) do
+		if p and p.Parent then
+			table.insert(alive, p)
+		end
+	end
+	entry.PlantDrops = alive
+
+	-- Max check
+	if #alive >= PLANT_DROP_MAX then return end
+
+	-- Place behind the monkey on the ground
+	local behindDir = -hrp.CFrame.LookVector
+	local dropPos = hrp.Position + behindDir * 3
+
+	-- Raycast straight down from monkey's feet to find actual ground.
+	-- Only place on surfaces that face upward (normal.Y > 0.7 = roughly horizontal).
+	-- Skip anything that isn't close to the monkey's current ground level.
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { entry.Model }
+	-- Cast from just below the monkey's feet (bottom of HRP)
+	local feetY = hrp.Position.Y - hrp.Size.Y * 0.5
+	local rayOrigin = Vector3.new(dropPos.X, feetY, dropPos.Z)
+	local rayResult = Workspace:Raycast(
+		rayOrigin,
+		Vector3.new(0, -50, 0),
+		rayParams
+	)
+	if not rayResult then return end -- no ground found, skip drop
+
+	-- Must be a roughly horizontal surface (ground, not a wall or angled object)
+	if rayResult.Normal.Y < 0.7 then return end
+
+	-- Must be close to the monkey's ground level (within 10 studs below feet)
+	local groundY = rayResult.Position.Y
+	if feetY - groundY > 10 then return end
+
+	-- Clone and place
+	local plant = template:Clone()
+
+	-- Random scale 0.8x–2.0x
+	local scale = 0.8 + math.random() * 1.2
+	plant:ScaleTo(scale)
+
+	local pp = plant.PrimaryPart
+	if pp then
+		-- Random Y rotation, flat on ground (no pitch/roll regardless of scale)
+		local yaw = math.rad(math.random(0, 360))
+		plant:PivotTo(CFrame.new(dropPos.X, groundY, dropPos.Z) * CFrame.Angles(0, yaw, 0))
+	end
+
+	-- Ensure all parts are non-collidable and anchored
+	for _, desc in ipairs(plant:GetDescendants()) do
+		if desc:IsA("BasePart") then
+			desc.CanCollide = false
+			desc.Anchored = true
+		end
+	end
+
+	plant.Parent = Workspace
+
+	table.insert(entry.PlantDrops, plant)
+
+	-- Auto-delete after 1-3 minutes
+	local lifetime = PLANT_DROP_LIFETIME_MIN
+		+ math.random() * (PLANT_DROP_LIFETIME_MAX - PLANT_DROP_LIFETIME_MIN)
+	task.delay(lifetime, function()
+		if plant and plant.Parent then
+			plant:Destroy()
+		end
+	end)
+end
 
 local function getTreeSideOffset(treePart: BasePart, side: string): Vector3
 	local halfX = treePart.Size.X * 0.5
@@ -842,6 +948,11 @@ function AIService:Unregister(brainrotId: string)
 		entry.Locomotion:Cleanup(entry)
 	end
 
+	-- Release tree side if still holding one
+	if entry.HideSpot then
+		releaseTreeSide(entry.HideSpot, entry.Id)
+	end
+
 	for _, c in ipairs(entry.Conn) do
 		c:Disconnect()
 	end
@@ -912,6 +1023,8 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 		entry.HideTreeSide = nil
 		entry._popping = nil
 		entry._popNextState = nil
+		entry._forceTree = nil
+		entry._seekHideStartedAt = nil
 		entry.OriginalCFrame = nil
 		entry.Model:SetAttribute("HideBillboard", false)
 		safeSetAnim(entry, "Run")
@@ -928,7 +1041,7 @@ function AIService:_setState(entry: AIEntry, state: AIStateName)
 			entry.Locomotion:Stop(entry)
 		end
 		entry.Model:SetAttribute("HideBillboard", true)
-		safeSetAnim(entry, "None") -- no animation while buried underground
+		safeSetAnim(entry, "Idle") -- plays Idle during dig tween; switches to None when fully buried
 	elseif state == "Grab" then
 		entry.Humanoid.WalkSpeed = 0
 		if entry.Locomotion and type(entry.Locomotion.Stop) == "function" then
@@ -971,10 +1084,24 @@ function AIService:_onDamaged(entry: AIEntry)
 			return
 		end
 
-		-- Shot in tree: unanchor for physics freefall (no teleport!)
+		-- Shot in tree: teleport to ground at tree base, then flee
 		if entry.State == "HideTree" then
 			releaseTreeSide(entry.HideSpot, entry.Id)
-			if entry.HRP then entry.HRP.Anchored = false end
+			if entry.HRP and entry.HRP.Parent and entry.HideSpot then
+				local treeBase = entry.HideSpot.Position
+				local rayP = RaycastParams.new()
+				rayP.FilterType = Enum.RaycastFilterType.Exclude
+				rayP.FilterDescendantsInstances = { entry.Model }
+				local ray = Workspace:Raycast(treeBase + Vector3.new(0, 5, 0), Vector3.new(0, -200, 0), rayP)
+				local groundY = ray and ray.Position.Y or (treeBase.Y - entry.HideSpot.Size.Y * 0.5)
+				local halfH = entry.HRP.Size.Y * 0.5
+				local landPos = Vector3.new(treeBase.X, groundY + halfH + 1, treeBase.Z)
+				entry.HRP.CFrame = CFrame.new(landPos, entry.HRP.CFrame.LookVector + landPos)
+				entry.HRP.Anchored = false
+				pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+			elseif entry.HRP then
+				entry.HRP.Anchored = false
+			end
 			entry.HideTreeSide = nil
 		end
 		entry.HideSpot = nil
@@ -1544,8 +1671,28 @@ function AIService:_stepAll()
 			self:_stepOne(entry)
 			self:_velocityAnimCheck(entry)
 			self:_stuckHopCheck(entry)
+			self:_plantDropCheck(entry)
 		end
 	end
+end
+
+-- Plant drop: ambush monkeys drop fake plants while moving as camouflage
+function AIService:_plantDropCheck(entry: AIEntry)
+	if not entry.IsAmbush then return end
+	if entry.State == "Dead" then return end
+
+	-- Only drop while moving on the ground (SeekHide, Chase, Flee)
+	local state = entry.State
+	if state ~= "SeekHide" and state ~= "Chase" and state ~= "Flee" then return end
+
+	local t = now()
+	if t < (entry.NextPlantDropAt or 0) then return end
+
+	-- Schedule next drop
+	entry.NextPlantDropAt = t + PLANT_DROP_INTERVAL_MIN
+		+ math.random() * (PLANT_DROP_INTERVAL_MAX - PLANT_DROP_INTERVAL_MIN)
+
+	dropPlant(entry)
 end
 
 function AIService:_stepOne(entry: AIEntry)
@@ -2136,26 +2283,38 @@ function AIService:_stepOne(entry: AIEntry)
 		entry.Humanoid.WalkSpeed = runSpeed
 		safeSetAnim(entry, "Run")
 
-		-- Choose hide type: 4:1 favoring underground over tree
+		-- Choose hide type: 70% underground, 30% tree (always hiding, never idle on ground)
 		local treeTag = entry.P.TreeTag or "Tree"
 		if not entry.HideType then
-			local roll = math.random(1, AMBUSH_DIG_WEIGHT + 1) -- 1-5: 1=tree, 2-5=dig
-			if roll == 1 then
-				-- Try to find a tree with an open side
+			-- Force tree if _forceTree was set by underground boredom coin flip
+			local wantTree = entry._forceTree or (math.random() < 0.30)
+			entry._forceTree = nil
+
+			if wantTree then
+				-- Try to find a tree with an open side, preferring trees inside territory
+				local terr = entry.Territory
 				local bestTree: BasePart? = nil
 				local bestDist = math.huge
 				for _, tree in ipairs(CollectionService:GetTagged(treeTag)) do
 					local treePart = if tree:IsA("Model") then tree.PrimaryPart else tree
 					if treePart and treePart:IsA("BasePart") then
-						-- Check if tree has open sides
 						local occ = _treeSideOccupants[treePart]
 						local usedCount = 0
 						if occ then for _ in pairs(occ) do usedCount += 1 end end
 						if usedCount < AMBUSH_MAX_PER_TREE then
-							local d = (treePart.Position - pos).Magnitude
-							if d < bestDist and d < 200 then
-								bestDist = d
-								bestTree = treePart
+							-- Only pick trees inside territory (or within leash if no territory)
+							local treeOk = true
+							if terr then
+								treeOk = isInsideTerritoryXZ(terr, treePart.Position)
+							else
+								treeOk = (treePart.Position - entry.SpawnPos).Magnitude <= entry.LeashRadius
+							end
+							if treeOk then
+								local d = (treePart.Position - pos).Magnitude
+								if d < bestDist and d < 200 then
+									bestDist = d
+									bestTree = treePart
+								end
 							end
 						end
 					end
@@ -2163,8 +2322,9 @@ function AIService:_stepOne(entry: AIEntry)
 				if bestTree then
 					entry.HideSpot = bestTree
 					entry.HideType = "tree"
+					entry._seekHideStartedAt = t -- timeout tracker
 				else
-					entry.HideType = "underground" -- no tree available, dig
+					entry.HideType = "underground" -- no reachable tree, dig instead
 				end
 			else
 				entry.HideType = "underground"
@@ -2173,8 +2333,29 @@ function AIService:_stepOne(entry: AIEntry)
 
 		if entry.HideType == "tree" and entry.HideSpot then
 			local treePart = entry.HideSpot
+
+			-- Stuck timeout: if we can't reach the tree within 8 seconds, give up and dig
+			if t - (entry._seekHideStartedAt or t) > 8 then
+				entry.HideSpot = nil
+				entry.HideType = "underground"
+				entry._seekHideStartedAt = nil
+				-- Fall through to underground below
+			end
+		end
+
+		if entry.HideType == "tree" and entry.HideSpot then
+			local treePart = entry.HideSpot
 			local dToTree = (Vector3.new(treePart.Position.X, pos.Y, treePart.Position.Z) - pos).Magnitude
-			if dToTree <= 6 then
+			-- Climb distance accounts for tree girth + monkey body size
+			-- Monkey body can be ~10 studs wide; pathfinding stops the HRP far from tree center
+			local treeRadius = math.max(treePart.Size.X, treePart.Size.Z) * 0.5
+			local bodyRadius = entry.HRP and math.max(entry.HRP.Size.X, entry.HRP.Size.Z) * 0.5 or 1
+			-- Also check the model bounding box for large bodies without proportional HRPs
+			local modelSize = entry.Model:GetExtentsSize()
+			local modelRadius = math.max(modelSize.X, modelSize.Z) * 0.5
+			local effectiveBodyRadius = math.max(bodyRadius, modelRadius)
+			local climbDist = treeRadius + effectiveBodyRadius + 4
+			if dToTree <= climbDist then
 				-- Arrived at tree — claim a side
 				local side = claimTreeSide(treePart, entry.Id)
 				if not side then
@@ -2208,10 +2389,9 @@ function AIService:_stepOne(entry: AIEntry)
 
 		if entry.HideType == "underground" then
 			-- Dig underground: anchor and start sink tween
-			local hpLo2, hpHi2 = pRange(entry.P, "HidePatience", 15, 30)
-			entry.HideUntil = now() + randRange(hpLo2, hpHi2)
+			-- Underground boredom: 60-180 seconds before relocating
+			entry.HideUntil = now() + randRange(60, 180)
 			if entry.HRP and entry.HRP.Parent then
-				-- Compute upright ground CFrame regardless of current orientation
 				-- Raycast down to find the actual ground surface
 				local hrpPos = entry.HRP.Position
 				local rayOrigin = Vector3.new(hrpPos.X, hrpPos.Y + 10, hrpPos.Z)
@@ -2224,23 +2404,27 @@ function AIService:_stepOne(entry: AIEntry)
 					rayParams
 				)
 				local groundY = rayResult and rayResult.Position.Y or hrpPos.Y
-				-- Place HRP center at ground level + half HRP height (standing on ground)
 				local halfH = entry.HRP.Size.Y * 0.5
-				local uprightPos = Vector3.new(hrpPos.X, groundY + halfH, hrpPos.Z)
+
 				-- Keep the monkey's facing direction (yaw only), discard tilt/roll
 				local lookDir = entry.HRP.CFrame.LookVector
 				local flatLook = Vector3.new(lookDir.X, 0, lookDir.Z)
 				if flatLook.Magnitude < 0.01 then flatLook = Vector3.new(0, 0, -1) end
 				flatLook = flatLook.Unit
 
+				-- Standing position: HRP center at groundY + halfH (feet on ground)
+				local uprightPos = Vector3.new(hrpPos.X, groundY + halfH, hrpPos.Z)
 				local uprightCF = CFrame.new(uprightPos, uprightPos + flatLook)
-				entry.OriginalCFrame = uprightCF -- pop-back target is upright on ground
+				entry.OriginalCFrame = uprightCF -- pop-back target
+
+				-- Buried position: HRP center at groundY - halfH + 15% of HRP height
+				-- Top of HRP peeks slightly above ground
+				local peekOffset = entry.HRP.Size.Y * 0.15
+				local buriedPos = Vector3.new(hrpPos.X, groundY - halfH + peekOffset, hrpPos.Z)
+				local buriedCF = CFrame.new(buriedPos, buriedPos + flatLook)
 
 				entry.HRP.Anchored = true
-				-- Sink 80% of HRP height below the upright ground position
-				local sinkDepth = entry.HRP.Size.Y * 0.8
-				local sunkCF = uprightCF - Vector3.new(0, sinkDepth, 0)
-				startAmbushTween(entry, sunkCF, TWEEN_DIG_TIME)
+				startAmbushTween(entry, buriedCF, TWEEN_DIG_TIME)
 			end
 			self:_setState(entry, "HideUnderground")
 		end
@@ -2268,6 +2452,8 @@ function AIService:_stepOne(entry: AIEntry)
 		end
 
 		-- Climb tween done — sitting at tree top, switch to Idle
+		-- Force Humanoid out of Physics state so animations play while anchored
+		pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
 		safeSetAnim(entry, "Idle")
 
 		-- At tree side top — scan for players (horizontal range + directly below)
@@ -2293,31 +2479,56 @@ function AIService:_stepOne(entry: AIEntry)
 			end
 		end
 		if near then
-			-- Jump off tree — physics freefall! Unanchor and let gravity do the work
+			-- Drop from tree: teleport to ground at tree base, then unanchor
 			entry.Target = near
 			entry.NextAttackAt = 0 -- attack IMMEDIATELY after landing
 			releaseTreeSide(treePart, entry.Id)
+			cancelAmbushTween(entry)
+			if entry.HRP and entry.HRP.Parent then
+				-- Raycast down from tree to find ground
+				local treeBase = treePart.Position
+				local rayP = RaycastParams.new()
+				rayP.FilterType = Enum.RaycastFilterType.Exclude
+				rayP.FilterDescendantsInstances = { entry.Model }
+				local ray = Workspace:Raycast(treeBase + Vector3.new(0, 5, 0), Vector3.new(0, -200, 0), rayP)
+				local groundY = ray and ray.Position.Y or (treeBase.Y - treePart.Size.Y * 0.5)
+				local halfH = entry.HRP.Size.Y * 0.5
+				local lookDir = (getCharHRP(near) and getCharHRP(near).Position or treeBase) - treeBase
+				lookDir = Vector3.new(lookDir.X, 0, lookDir.Z)
+				if lookDir.Magnitude < 0.1 then lookDir = Vector3.new(0, 0, -1) end
+				lookDir = lookDir.Unit
+				local landPos = Vector3.new(treeBase.X, groundY + halfH + 1, treeBase.Z)
+				entry.HRP.CFrame = CFrame.new(landPos, landPos + lookDir)
+				entry.HRP.Anchored = false
+				pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+			end
 			entry.HideSpot = nil
 			entry.HideType = nil
 			entry.HideTreeSide = nil
-			cancelAmbushTween(entry)
-			if entry.HRP and entry.HRP.Parent then
-				entry.HRP.Anchored = false
-			end
 			self:_setState(entry, "Chase")
 			return
 		end
 
-		-- Patience timer: freefall off tree, then relocate
+		-- Patience timer: drop to ground at tree base, then relocate
 		if t >= (entry.HideUntil or 0) then
 			releaseTreeSide(treePart, entry.Id)
+			cancelAmbushTween(entry)
+			if entry.HRP and entry.HRP.Parent then
+				local treeBase = treePart.Position
+				local rayP = RaycastParams.new()
+				rayP.FilterType = Enum.RaycastFilterType.Exclude
+				rayP.FilterDescendantsInstances = { entry.Model }
+				local ray = Workspace:Raycast(treeBase + Vector3.new(0, 5, 0), Vector3.new(0, -200, 0), rayP)
+				local groundY = ray and ray.Position.Y or (treeBase.Y - treePart.Size.Y * 0.5)
+				local halfH = entry.HRP.Size.Y * 0.5
+				local landPos = Vector3.new(treeBase.X, groundY + halfH + 1, treeBase.Z)
+				entry.HRP.CFrame = CFrame.new(landPos, entry.HRP.CFrame.LookVector + landPos)
+				entry.HRP.Anchored = false
+				pcall(function() entry.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+			end
 			entry.HideSpot = nil
 			entry.HideType = nil
 			entry.HideTreeSide = nil
-			cancelAmbushTween(entry)
-			if entry.HRP and entry.HRP.Parent then
-				entry.HRP.Anchored = false
-			end
 			self:_setState(entry, "SeekHide")
 		end
 		return
@@ -2326,10 +2537,13 @@ function AIService:_stepOne(entry: AIEntry)
 	if entry.State == "HideUnderground" then
 		entry.Humanoid.WalkSpeed = 0
 
-		-- Phase 1: Sinking tween playing — wait
+		-- Phase 1: Sinking tween playing — wait (Idle anim plays during dig)
 		if entry.HideTween and not entry.HideTweenDone then
 			return
 		end
+
+		-- Dig tween done — fully underground, stop all animations
+		safeSetAnim(entry, "None")
 
 		-- Phase 2: Popping up — tween is playing back to surface (still anchored)
 		-- _popTarget stores who/what triggered the pop so we know where to go after
@@ -2372,8 +2586,12 @@ function AIService:_stepOne(entry: AIEntry)
 			return
 		end
 
-		-- Patience timer: pop out, then relocate
+		-- Boredom timer: pop out and 50/50 dig new spot or climb a tree
 		if t >= (entry.HideUntil or 0) then
+			-- Coin flip: force tree climb or dig somewhere new
+			if math.random() < 0.5 then
+				entry._forceTree = true
+			end
 			if entry.OriginalCFrame and entry.HRP and entry.HRP.Parent then
 				cancelAmbushTween(entry)
 				startAmbushTween(entry, entry.OriginalCFrame, TWEEN_POP_TIME)

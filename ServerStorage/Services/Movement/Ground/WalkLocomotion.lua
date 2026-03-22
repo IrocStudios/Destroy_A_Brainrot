@@ -342,8 +342,25 @@ function WalkLocomotion:_followWaypoints(entry: any)
 	-- Look-ahead: MoveTo a waypoint several steps ahead of the current one.
 	-- This prevents the Humanoid from reaching its target between ticks and
 	-- pausing — it always has a further destination and blends turns smoothly.
-	local aheadIdx = math.min(state.WaypointIndex + LOOK_AHEAD, #state.Waypoints)
-	hum:MoveTo(state.Waypoints[aheadIdx].Position)
+	-- BUT: only look ahead to waypoints we can reach in a straight line (no wall between).
+	local bestIdx = state.WaypointIndex
+	local maxIdx = math.min(state.WaypointIndex + LOOK_AHEAD, #state.Waypoints)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { entry.Model }
+
+	for i = maxIdx, state.WaypointIndex + 1, -1 do
+		local wpPos = state.Waypoints[i].Position
+		local dir = wpPos - hrp.Position
+		local result = Workspace:Raycast(hrp.Position, dir, rayParams)
+		if not result or (result.Position - hrp.Position).Magnitude >= dir.Magnitude * 0.9 then
+			-- Clear line of sight to this waypoint — use it
+			bestIdx = i
+			break
+		end
+	end
+
+	hum:MoveTo(state.Waypoints[bestIdx].Position)
 end
 
 return WalkLocomotion

@@ -11,7 +11,6 @@ local GrabAttack = {}
 GrabAttack.Name = "GrabAttack"
 GrabAttack.Type = "Melee"
 GrabAttack.Weight = "Heavy"
-GrabAttack.AnimationKey = "Grab"
 
 ----------------------------------------------------------------------
 -- CanExecute: valid grab target within range
@@ -308,6 +307,10 @@ function GrabAttack:Execute(entry: any, target: any, services: any, moveConfig: 
 	-- Clear AI grab state
 	entry.GrabTarget = nil
 	-- AIService's FleeAfterAttack handles state transition from here
+end
+
+function GrabAttack:GetAnimationName(): string
+	return "Grab" -- plays "Grab" directly, not "attack_Grab"
 end
 
 return GrabAttack
